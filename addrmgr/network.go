@@ -8,7 +8,13 @@ package addrmgr
 import (
 	"fmt"
 	"net"
+
+	"golang.org/x/crypto/sha3"
 )
+
+// torV3VersionByte represents the version byte used when encoding and decoding
+// a TORv3 host name.
+const torV3VersionByte = byte(3)
 
 var (
 	// rfc1918Nets specifies the IPv4 private address blocks as defined by
@@ -70,19 +76,6 @@ var (
 	// rfc6598Net specifies the IPv4 block as defined by RFC6598 (100.64.0.0/10).
 	rfc6598Net = ipNet("100.64.0.0", 10, 32)
 
-	// onionCatNet defines the IPv6 address block used to support Tor.
-	// bitcoind encodes a .onion address as a 16 byte number by decoding the
-	// address prior to the .onion (i.e. the key hash) base32 into a ten
-	// byte number. It then stores the first 6 bytes of the address as
-	// 0xfd, 0x87, 0xd8, 0x7e, 0xeb, 0x43.
-	//
-	// This is the same range used by OnionCat, which is part of the
-	// RFC4193 unique local IPv6 range.
-	//
-	// In summary the format is:
-	// { magic 6 bytes, 10 bytes base32 decode of key hash }
-	onionCatNet = ipNet("fd87:d87e:eb43::", 48, 128)
-
 	// zero4Net defines the IPv4 address block for address staring with 0
 	// (0.0.0.0/8).
 	zero4Net = ipNet("0.0.0.0", 8, 32)
@@ -108,41 +101,20 @@ func isLocal(netIP net.IP) bool {
 	return netIP.IsLoopback() || zero4Net.Contains(netIP)
 }
 
-// isOnionCatTor returns whether or not the passed address is in the IPv6 range
-// used by bitcoin to support Tor (fd87:d87e:eb43::/48).  Note that this range
-// is the same range used by OnionCat, which is part of the RFC4193 unique local
-// IPv6 range.
-func isOnionCatTor(netIP net.IP) bool {
-	return onionCatNet.Contains(netIP)
-}
-
-// NetAddressType is used to indicate which network a network address belongs
-// to.
+// NetAddressType represents the type of an address (IPv4, IPv6, TOR, etc.).
 type NetAddressType uint8
 
+// NOTE: This specifically does not use iota since the NetAddressType is used in
+// serialization. These constants cannot be changed or re-used if new items are
+// added.
 const (
-	LocalAddress NetAddressType = iota
-	IPv4Address
-	IPv6Address
-	TORv2Address
+	UnknownAddressType NetAddressType = 0
+	IPv4Address        NetAddressType = 1
+	IPv6Address        NetAddressType = 2
+	// TORv2Address       NetAddressType = 3  // No longer supported
+	TORv3Address NetAddressType = 4
+	I2PAddress   NetAddressType = 5
 )
-
-// addressType returns the network address type of the provided network address.
-func addressType(netIP net.IP) NetAddressType {
-	switch {
-	case isLocal(netIP):
-		return LocalAddress
-
-	case isIPv4(netIP):
-		return IPv4Address
-
-	case isOnionCatTor(netIP):
-		return TORv2Address
-
-	default:
-		return IPv6Address
-	}
-}
 
 // isRFC1918 returns whether or not the passed address is part of the IPv4
 // private network address space as defined by RFC1918 (10.0.0.0/8,
@@ -235,6 +207,50 @@ func isRFC6598(netIP net.IP) bool {
 	return rfc6598Net.Contains(netIP)
 }
 
+// calcTORv3Checksum returns the checksum bytes given a 32 byte TORv3 public key.
+func calcTORv3Checksum(publicKey [32]byte) [2]byte {
+	const (
+		prefix    = ".onion checksum"
+		prefixLen = len(prefix)
+		inputLen  = prefixLen + len(publicKey) + 1
+	)
+	var input [inputLen]byte
+	copy(input[:], prefix)
+	copy(input[prefixLen:], publicKey[:])
+	input[inputLen-1] = torV3VersionByte
+	digest := sha3.Sum256(input[:])
+
+	var result [2]byte
+	copy(result[:], digest[:2])
+	return result
+}
+
+// isTORv3 returns whether or not the given address is a valid TORv3 address
+// with the checksum and version bytes. If it is valid, it also returns the
+// public key of the TORv3 address.
+func isTORv3(addressBytes []byte) ([]byte, bool) {
+	if len(addressBytes) != 35 {
+		return nil, false
+	}
+
+	version := addressBytes[34]
+	if version != torV3VersionByte {
+		return nil, false
+	}
+
+	var publicKey [32]byte
+	copy(publicKey[:], addressBytes[:32])
+	var checksum [2]byte
+	copy(checksum[:], addressBytes[32:34])
+
+	computedChecksum := calcTORv3Checksum(publicKey)
+	if computedChecksum != checksum {
+		return nil, false
+	}
+
+	return publicKey[:], true
+}
+
 // isValid returns whether or not the passed address is valid.  The address is
 // considered invalid under the following circumstances:
 // IPv4: It is either a zero or all bits set address.
@@ -253,14 +269,14 @@ func IsRoutable(netIP net.IP) bool {
 	return isValid(netIP) && !(isRFC1918(netIP) || isRFC2544(netIP) ||
 		isRFC3927(netIP) || isRFC4862(netIP) || isRFC3849(netIP) ||
 		isRFC4843(netIP) || isRFC5737(netIP) || isRFC6598(netIP) ||
-		isLocal(netIP) || (isRFC4193(netIP) && !isOnionCatTor(netIP)))
+		isLocal(netIP) || isRFC4193(netIP))
 }
 
 // GroupKey returns a string representing the network group an address is part
 // of.  This is the /16 for IPv4, the /32 (/36 for he.net) for IPv6, the string
-// "local" for a local address, the string "tor:key" where key is the /4 of the
-// onion address for Tor address, and the string "unroutable" for an unroutable
-// address.
+// "local" for a local address, the string "torv3:key" where the key is the
+// first 4 bits of the pubkey for TORv3 addresses, and the string "unroutable"
+// for an unroutable address.
 func (na *NetAddress) GroupKey() string {
 	netIP := net.IP(na.IP)
 	if isLocal(netIP) {
@@ -269,7 +285,7 @@ func (na *NetAddress) GroupKey() string {
 	if !IsRoutable(netIP) {
 		return "unroutable"
 	}
-	if isIPv4(netIP) {
+	if na.Type == IPv4Address {
 		return netIP.Mask(net.CIDRMask(16, 32)).String()
 	}
 	if isRFC6145(netIP) || isRFC6052(netIP) {
@@ -291,12 +307,12 @@ func (na *NetAddress) GroupKey() string {
 		}
 		return newIP.Mask(net.CIDRMask(16, 32)).String()
 	}
-	if isOnionCatTor(netIP) {
-		// group is keyed off the first 4 bits of the actual onion key.
-		return fmt.Sprintf("tor:%d", netIP[6]&((1<<4)-1))
+	if na.Type == TORv3Address {
+		// group is keyed off the first 4 bits of the public key.
+		return fmt.Sprintf("torv3:%d", netIP[0]&((1<<4)-1))
 	}
 
-	// OK, so now we know ourselves to be a IPv6 address.
+	// If none of the previous conditions were true, then it must be IPv6.
 	// bitcoind uses /32 for everything, except for Hurricane Electric's
 	// (he.net) IP range, which it uses /36 for.
 	bits := 32

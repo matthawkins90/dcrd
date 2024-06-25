@@ -14,6 +14,14 @@ const (
 	// ErrAddressNotFound indicates that an operation in the address manager
 	// failed due to an address lookup failure.
 	ErrAddressNotFound = ErrorKind("ErrAddressNotFound")
+
+	// ErrUnknownAddressType indicates that the network address type could not
+	// be determined from a network address' bytes.
+	ErrUnknownAddressType = ErrorKind("ErrUnknownAddressType")
+
+	// ErrMismatchedAddressType indicates that a network address was expected to
+	// be a certain type, but the derived type does not match.
+	ErrMismatchedAddressType = ErrorKind("ErrMismatchedAddressType")
 )
 
 // Error satisfies the error interface and prints human-readable errors.

@@ -1,12 +1,11 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015-2023 The Decred developers
+// Copyright (c) 2015-2024 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package addrmgr
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -21,16 +20,12 @@ import (
 // Put some IP in here for convenience. Points to google.
 var someIP = "173.194.115.66"
 
-func lookupFunc(host string) ([]net.IP, error) {
-	return nil, errors.New("not implemented")
-}
-
 // addAddressByIP is a convenience function that adds an address to the
 // address manager given a valid string representation of an ip address and
 // a port.
 func (a *AddrManager) addAddressByIP(addr string, port uint16) {
 	ip := net.ParseIP(addr)
-	na := NewNetAddressIPPort(ip, port, 0)
+	na := NewNetAddressFromIPPort(ip, port, 0)
 	a.addOrUpdateAddress(na, na)
 }
 
@@ -45,7 +40,7 @@ func TestStartStop(t *testing.T) {
 		t.Fatalf("peers file exists though it should not: %s", peersFile)
 	}
 
-	amgr := New(dir, nil)
+	amgr := New(dir)
 	amgr.Start()
 
 	// Add single network address to the address manager.
@@ -63,7 +58,7 @@ func TestStartStop(t *testing.T) {
 	}
 
 	// Start a new address manager, which initializes it from the peers file.
-	amgr = New(dir, nil)
+	amgr = New(dir)
 	amgr.Start()
 
 	knownAddress := amgr.GetAddress()
@@ -86,7 +81,7 @@ func TestStartStop(t *testing.T) {
 }
 
 func TestAddOrUpdateAddress(t *testing.T) {
-	amgr := New("testaddaddressupdate", nil)
+	amgr := New("testaddaddressupdate")
 	amgr.Start()
 	if ka := amgr.GetAddress(); ka != nil {
 		t.Fatal("address manager should contain no addresses")
@@ -95,7 +90,7 @@ func TestAddOrUpdateAddress(t *testing.T) {
 	if ip == nil {
 		t.Fatalf("invalid IP address %s", someIP)
 	}
-	na := NewNetAddressIPPort(net.ParseIP(someIP), 8333, 0)
+	na := NewNetAddressFromIPPort(net.ParseIP(someIP), 8333, 0)
 	amgr.addOrUpdateAddress(na, na)
 	ka := amgr.GetAddress()
 	newlyAddedAddr := ka.NetAddress()
@@ -185,10 +180,10 @@ func TestAddLocalAddress(t *testing.T) {
 	const testPort = 8333
 	const testServices = wire.SFNodeNetwork
 
-	amgr := New("testaddlocaladdress", nil)
+	amgr := New("testaddlocaladdress")
 	validLocalAddresses := make(map[string]struct{})
 	for _, test := range tests {
-		netAddr := NewNetAddressIPPort(test.ip, testPort, testServices)
+		netAddr := NewNetAddressFromIPPort(test.ip, testPort, testServices)
 		result := amgr.AddLocalAddress(netAddr, test.priority)
 		if result == nil && !test.valid {
 			t.Errorf("%q: address should have been accepted", test.name)
@@ -217,7 +212,7 @@ func TestAddLocalAddress(t *testing.T) {
 	// address manager are also returned from a call to LocalAddresses.
 	for _, localAddr := range amgr.LocalAddresses() {
 		localAddrIP := net.ParseIP(localAddr.Address)
-		netAddr := NewNetAddressIPPort(localAddrIP, testPort, testServices)
+		netAddr := NewNetAddressFromIPPort(localAddrIP, testPort, testServices)
 		netAddrKey := netAddr.Key()
 		if _, ok := validLocalAddresses[netAddrKey]; !ok {
 			t.Errorf("expected to find local address with key %v", netAddrKey)
@@ -226,7 +221,7 @@ func TestAddLocalAddress(t *testing.T) {
 }
 
 func TestAttempt(t *testing.T) {
-	n := New("testattempt", lookupFunc)
+	n := New("testattempt")
 
 	// Add a new address and get it.
 	n.addAddressByIP(someIP, 8333)
@@ -248,7 +243,7 @@ func TestAttempt(t *testing.T) {
 
 	// Attempt an ip not known to the address manager.
 	unknownIP := net.ParseIP("1.2.3.4")
-	unknownNetAddress := NewNetAddressIPPort(unknownIP, 1234, wire.SFNodeNetwork)
+	unknownNetAddress := NewNetAddressFromIPPort(unknownIP, 1234, wire.SFNodeNetwork)
 	err = n.Attempt(unknownNetAddress)
 	if err == nil {
 		t.Fatal("attempting unknown address should have returned an error")
@@ -256,7 +251,7 @@ func TestAttempt(t *testing.T) {
 }
 
 func TestConnected(t *testing.T) {
-	n := New("testconnected", lookupFunc)
+	n := New("testconnected")
 
 	// Add a new address and get it
 	n.addAddressByIP(someIP, 8333)
@@ -277,7 +272,7 @@ func TestConnected(t *testing.T) {
 	// Attempt to flag an ip address not known to the address manager as
 	// connected.
 	unknownIP := net.ParseIP("1.2.3.4")
-	unknownNetAddress := NewNetAddressIPPort(unknownIP, 1234, wire.SFNodeNetwork)
+	unknownNetAddress := NewNetAddressFromIPPort(unknownIP, 1234, wire.SFNodeNetwork)
 	err = n.Connected(unknownNetAddress)
 	if err == nil {
 		t.Fatal("attempting to mark unknown address as connected should have " +
@@ -286,7 +281,7 @@ func TestConnected(t *testing.T) {
 }
 
 func TestNeedMoreAddresses(t *testing.T) {
-	n := New("testneedmoreaddresses", lookupFunc)
+	n := New("testneedmoreaddresses")
 	addrsToAdd := needAddressThreshold
 	b := n.NeedMoreAddresses()
 	if !b {
@@ -296,10 +291,10 @@ func TestNeedMoreAddresses(t *testing.T) {
 
 	for i := 0; i < addrsToAdd; i++ {
 		s := fmt.Sprintf("%d.%d.173.147", i/128+60, i%128+60)
-		addrs[i] = NewNetAddressIPPort(net.ParseIP(s), 8333, wire.SFNodeNetwork)
+		addrs[i] = NewNetAddressFromIPPort(net.ParseIP(s), 8333, wire.SFNodeNetwork)
 	}
 
-	srcAddr := NewNetAddressIPPort(net.ParseIP("173.144.173.111"), 8333, 0)
+	srcAddr := NewNetAddressFromIPPort(net.ParseIP("173.144.173.111"), 8333, 0)
 
 	n.AddAddresses(addrs, srcAddr)
 	numAddrs := n.numAddresses()
@@ -315,16 +310,16 @@ func TestNeedMoreAddresses(t *testing.T) {
 }
 
 func TestGood(t *testing.T) {
-	n := New("testgood", lookupFunc)
+	n := New("testgood")
 	addrsToAdd := 64 * 64
 	addrs := make([]*NetAddress, addrsToAdd)
 
 	for i := 0; i < addrsToAdd; i++ {
 		s := fmt.Sprintf("%d.173.147.%d", i/64+60, i%64+60)
-		addrs[i] = NewNetAddressIPPort(net.ParseIP(s), 8333, wire.SFNodeNetwork)
+		addrs[i] = NewNetAddressFromIPPort(net.ParseIP(s), 8333, wire.SFNodeNetwork)
 	}
 
-	srcAddr := NewNetAddressIPPort(net.ParseIP("173.144.173.111"), 8333, wire.SFNodeNetwork)
+	srcAddr := NewNetAddressFromIPPort(net.ParseIP("173.144.173.111"), 8333, wire.SFNodeNetwork)
 
 	n.AddAddresses(addrs, srcAddr)
 	for _, addr := range addrs {
@@ -348,7 +343,7 @@ func TestGood(t *testing.T) {
 	// the new bucket, and when marked good it should move to the tried bucket.
 	// If the tried bucket is full then it should make room for the newly tried
 	// address by moving the old one back to the new bucket.
-	n = New("testgood_tried_overflow", lookupFunc)
+	n = New("testgood_tried_overflow")
 	n.triedBucketSize = 1
 	n.getNewBucket = func(netAddr, srcAddr *NetAddress) int {
 		return 0
@@ -357,8 +352,8 @@ func TestGood(t *testing.T) {
 		return 0
 	}
 
-	addrA := NewNetAddressIPPort(net.ParseIP("173.144.173.1"), 8333, 0)
-	addrB := NewNetAddressIPPort(net.ParseIP("173.144.173.2"), 8333, 0)
+	addrA := NewNetAddressFromIPPort(net.ParseIP("173.144.173.1"), 8333, 0)
+	addrB := NewNetAddressFromIPPort(net.ParseIP("173.144.173.2"), 8333, 0)
 	addrAKey := addrA.Key()
 	addrBKey := addrB.Key()
 
@@ -433,7 +428,7 @@ func TestGood(t *testing.T) {
 }
 
 func TestGetAddress(t *testing.T) {
-	n := New("testgetaddress", lookupFunc)
+	n := New("testgetaddress")
 
 	// Get an address from an empty set (should error)
 	if rv := n.GetAddress(); rv != nil {
@@ -478,7 +473,7 @@ func TestGetAddress(t *testing.T) {
 
 	// Attempting to mark an unknown address as good should return an error.
 	unknownIP := net.ParseIP("1.2.3.4")
-	unknownNetAddress := NewNetAddressIPPort(unknownIP, 1234, wire.SFNodeNetwork)
+	unknownNetAddress := NewNetAddressFromIPPort(unknownIP, 1234, wire.SFNodeNetwork)
 	err = n.Good(unknownNetAddress)
 	if err == nil {
 		t.Fatal("attempting to mark unknown address as good should have " +
@@ -489,7 +484,7 @@ func TestGetAddress(t *testing.T) {
 func TestGetBestLocalAddress(t *testing.T) {
 	newAddressFromIP := func(ip net.IP) *NetAddress {
 		const port = 0
-		return NewNetAddressIPPort(ip, port, wire.SFNodeNetwork)
+		return NewNetAddressFromIPPort(ip, port, wire.SFNodeNetwork)
 	}
 
 	localAddrs := []*NetAddress{
@@ -528,7 +523,7 @@ func TestGetBestLocalAddress(t *testing.T) {
 		newAddressFromIP(net.ParseIP("2001:470::1")),
 	}}
 
-	amgr := New("testgetbestlocaladdress", nil)
+	amgr := New("testgetbestlocaladdress")
 
 	// Test against default when there's no address
 	for x, test := range tests {
@@ -595,7 +590,7 @@ func TestCorruptPeersFile(t *testing.T) {
 	if err := fp.Close(); err != nil {
 		t.Fatalf("Could not write empty peers file: %s", peersFile)
 	}
-	amgr := New(dir, nil)
+	amgr := New(dir)
 	amgr.Start()
 	amgr.Stop()
 	if _, err := os.Stat(peersFile); err != nil {
@@ -603,267 +598,104 @@ func TestCorruptPeersFile(t *testing.T) {
 	}
 }
 
-// TestValidatePeerNa tests whether a remote address is considered reachable
-// from a local address.
-func TestValidatePeerNa(t *testing.T) {
-	const unroutableIpv4Address = "0.0.0.0"
-	const unroutableIpv6Address = "::1"
-	const routableIpv4Address = "12.1.2.3"
-	const routableIpv6Address = "2003::"
-	onionCatTorV2Address := onionCatNet.IP.String()
-	rfc4380IPAddress := rfc4380Net.IP.String()
-	rfc3964IPAddress := rfc3964Net.IP.String()
-	rfc6052IPAddress := rfc6052Net.IP.String()
-	rfc6145IPAddress := rfc6145Net.IP.String()
+// // TestHostToNetAddress ensures that HostToNetAddress behaves as expected
+// // given valid and invalid host name arguments.
+// func TestHostToNetAddress(t *testing.T) {
+// 	// Define a hostname that will cause a lookup to be performed using the
+// 	// lookupFunc provided to the address manager instance for each test.
+// 	const hostnameForLookup = "hostname.test"
+// 	const services = wire.SFNodeNetwork
 
-	tests := []struct {
-		name          string
-		localAddress  string
-		remoteAddress string
-		valid         bool
-		reach         NetAddressReach
-	}{{
-		name:          "torv2 to torv2",
-		localAddress:  onionCatTorV2Address,
-		remoteAddress: onionCatTorV2Address,
-		valid:         false,
-		reach:         Private,
-	}, {
-		name:          "routable ipv4 to torv2",
-		localAddress:  routableIpv4Address,
-		remoteAddress: onionCatTorV2Address,
-		valid:         true,
-		reach:         Ipv4,
-	}, {
-		name:          "unroutable ipv4 to torv2",
-		localAddress:  unroutableIpv4Address,
-		remoteAddress: onionCatTorV2Address,
-		valid:         false,
-		reach:         Default,
-	}, {
-		name:          "routable ipv6 to torv2",
-		localAddress:  routableIpv6Address,
-		remoteAddress: onionCatTorV2Address,
-		valid:         false,
-		reach:         Default,
-	}, {
-		name:          "unroutable ipv6 to torv2",
-		localAddress:  unroutableIpv6Address,
-		remoteAddress: onionCatTorV2Address,
-		valid:         false,
-		reach:         Default,
-	}, {
-		name:          "rfc4380 to rfc4380",
-		localAddress:  rfc4380IPAddress,
-		remoteAddress: rfc4380IPAddress,
-		valid:         true,
-		reach:         Teredo,
-	}, {
-		name:          "unroutable ipv4 to rfc4380",
-		localAddress:  unroutableIpv4Address,
-		remoteAddress: rfc4380IPAddress,
-		valid:         false,
-		reach:         Default,
-	}, {
-		name:          "routable ipv4 to rfc4380",
-		localAddress:  routableIpv4Address,
-		remoteAddress: rfc4380IPAddress,
-		valid:         true,
-		reach:         Ipv4,
-	}, {
-		name:          "routable ipv6 to rfc4380",
-		localAddress:  routableIpv6Address,
-		remoteAddress: rfc4380IPAddress,
-		valid:         true,
-		reach:         Ipv6Weak,
-	}, {
-		name:          "routable ipv4 to routable ipv4",
-		localAddress:  routableIpv4Address,
-		remoteAddress: routableIpv4Address,
-		valid:         true,
-		reach:         Ipv4,
-	}, {
-		name:          "routable ipv6 to routable ipv4",
-		localAddress:  routableIpv6Address,
-		remoteAddress: routableIpv4Address,
-		valid:         false,
-		reach:         Unreachable,
-	}, {
-		name:          "unroutable ipv4 to routable ipv6",
-		localAddress:  unroutableIpv4Address,
-		remoteAddress: routableIpv6Address,
-		valid:         false,
-		reach:         Default,
-	}, {
-		name:          "unroutable ipv6 to routable ipv6",
-		localAddress:  unroutableIpv6Address,
-		remoteAddress: routableIpv6Address,
-		valid:         false,
-		reach:         Default,
-	}, {
-		name:          "unroutable ipv4 to routable ipv6",
-		localAddress:  unroutableIpv4Address,
-		remoteAddress: routableIpv6Address,
-		valid:         false,
-		reach:         Default,
-	}, {
-		name:          "routable ipv4 to unroutable ipv6",
-		localAddress:  routableIpv4Address,
-		remoteAddress: unroutableIpv6Address,
-		valid:         false,
-		reach:         Unreachable,
-	}, {
-		name:          "routable ivp6 rfc4380 to routable ipv6",
-		localAddress:  rfc4380IPAddress,
-		remoteAddress: routableIpv6Address,
-		valid:         true,
-		reach:         Teredo,
-	}, {
-		name:          "routable ipv4 to routable ipv6",
-		localAddress:  routableIpv4Address,
-		remoteAddress: routableIpv6Address,
-		valid:         true,
-		reach:         Ipv4,
-	}, {
-		name:          "tunnelled ipv6 rfc3964 to routable ipv6",
-		localAddress:  rfc3964IPAddress,
-		remoteAddress: routableIpv6Address,
-		valid:         true,
-		reach:         Ipv6Weak,
-	}, {
-		name:          "tunnelled ipv6 rfc6052 to routable ipv6",
-		localAddress:  rfc6052IPAddress,
-		remoteAddress: routableIpv6Address,
-		valid:         true,
-		reach:         Ipv6Weak,
-	}, {
-		name:          "tunnelled ipv6 rfc6145 to routable ipv6",
-		localAddress:  rfc6145IPAddress,
-		remoteAddress: routableIpv6Address,
-		valid:         true,
-		reach:         Ipv6Weak,
-	}}
+// 	tests := []struct {
+// 		name       string
+// 		host       string
+// 		port       uint16
+// 		lookupFunc func(host string) ([]net.IP, error)
+// 		wantErr    bool
+// 		want       *NetAddress
+// 	}{{
+// 		name:       "valid onion address",
+// 		host:       "a5ccbdkubbr2jlcp.onion",
+// 		port:       8333,
+// 		lookupFunc: nil,
+// 		wantErr:    false,
+// 		want: NewNetAddressFromIPPort(
+// 			net.ParseIP("fd87:d87e:eb43:744:208d:5408:63a4:ac4f"), 8333,
+// 			services),
+// 	}, {
+// 		name:       "invalid onion address",
+// 		host:       "0000000000000000.onion",
+// 		port:       8333,
+// 		lookupFunc: nil,
+// 		wantErr:    true,
+// 		want:       nil,
+// 	}, {
+// 		name: "unresolvable host name",
+// 		host: hostnameForLookup,
+// 		port: 8333,
+// 		lookupFunc: func(host string) ([]net.IP, error) {
+// 			return nil, fmt.Errorf("unresolvable host %v", host)
+// 		},
+// 		wantErr: true,
+// 		want:    nil,
+// 	}, {
+// 		name: "not resolved host name",
+// 		host: hostnameForLookup,
+// 		port: 8333,
+// 		lookupFunc: func(host string) ([]net.IP, error) {
+// 			return nil, nil
+// 		},
+// 		wantErr: true,
+// 		want:    nil,
+// 	}, {
+// 		name: "resolved host name",
+// 		host: hostnameForLookup,
+// 		port: 8333,
+// 		lookupFunc: func(host string) ([]net.IP, error) {
+// 			return []net.IP{net.ParseIP("127.0.0.1")}, nil
+// 		},
+// 		wantErr: false,
+// 		want: NewNetAddressFromIPPort(net.ParseIP("127.0.0.1"), 8333,
+// 			services),
+// 	}, {
+// 		name:       "valid ip address",
+// 		host:       "12.1.2.3",
+// 		port:       8333,
+// 		lookupFunc: nil,
+// 		wantErr:    false,
+// 		want: NewNetAddressFromIPPort(net.ParseIP("12.1.2.3"), 8333,
+// 			services),
+// 	}}
 
-	addressManager := New("testValidatePeerNa", nil)
-	for _, test := range tests {
-		localIP := net.ParseIP(test.localAddress)
-		remoteIP := net.ParseIP(test.remoteAddress)
-		localNa := NewNetAddressIPPort(localIP, 8333, wire.SFNodeNetwork)
-		remoteNa := NewNetAddressIPPort(remoteIP, 8333, wire.SFNodeNetwork)
-
-		valid, reach := addressManager.ValidatePeerNa(localNa, remoteNa)
-		if valid != test.valid {
-			t.Errorf("%q: unexpected return value for valid - want '%v', "+
-				"got '%v'", test.name, test.valid, valid)
-			continue
-		}
-		if reach != test.reach {
-			t.Errorf("%q: unexpected return value for reach - want '%v', "+
-				"got '%v'", test.name, test.reach, reach)
-		}
-	}
-}
-
-// TestHostToNetAddress ensures that HostToNetAddress behaves as expected
-// given valid and invalid host name arguments.
-func TestHostToNetAddress(t *testing.T) {
-	// Define a hostname that will cause a lookup to be performed using the
-	// lookupFunc provided to the address manager instance for each test.
-	const hostnameForLookup = "hostname.test"
-	const services = wire.SFNodeNetwork
-
-	tests := []struct {
-		name       string
-		host       string
-		port       uint16
-		lookupFunc func(host string) ([]net.IP, error)
-		wantErr    bool
-		want       *NetAddress
-	}{{
-		name:       "valid onion address",
-		host:       "a5ccbdkubbr2jlcp.onion",
-		port:       8333,
-		lookupFunc: nil,
-		wantErr:    false,
-		want: NewNetAddressIPPort(
-			net.ParseIP("fd87:d87e:eb43:744:208d:5408:63a4:ac4f"), 8333,
-			services),
-	}, {
-		name:       "invalid onion address",
-		host:       "0000000000000000.onion",
-		port:       8333,
-		lookupFunc: nil,
-		wantErr:    true,
-		want:       nil,
-	}, {
-		name: "unresolvable host name",
-		host: hostnameForLookup,
-		port: 8333,
-		lookupFunc: func(host string) ([]net.IP, error) {
-			return nil, fmt.Errorf("unresolvable host %v", host)
-		},
-		wantErr: true,
-		want:    nil,
-	}, {
-		name: "not resolved host name",
-		host: hostnameForLookup,
-		port: 8333,
-		lookupFunc: func(host string) ([]net.IP, error) {
-			return nil, nil
-		},
-		wantErr: true,
-		want:    nil,
-	}, {
-		name: "resolved host name",
-		host: hostnameForLookup,
-		port: 8333,
-		lookupFunc: func(host string) ([]net.IP, error) {
-			return []net.IP{net.ParseIP("127.0.0.1")}, nil
-		},
-		wantErr: false,
-		want: NewNetAddressIPPort(net.ParseIP("127.0.0.1"), 8333,
-			services),
-	}, {
-		name:       "valid ip address",
-		host:       "12.1.2.3",
-		port:       8333,
-		lookupFunc: nil,
-		wantErr:    false,
-		want: NewNetAddressIPPort(net.ParseIP("12.1.2.3"), 8333,
-			services),
-	}}
-
-	for _, test := range tests {
-		addrManager := New("testHostToNetAddress", test.lookupFunc)
-		result, err := addrManager.HostToNetAddress(test.host, test.port,
-			services)
-		if test.wantErr == true && err == nil {
-			t.Errorf("%q: expected error but one was not returned", test.name)
-		}
-		if !reflect.DeepEqual(result, test.want) {
-			t.Errorf("%q: unexpected result - got %v, want %v", test.name,
-				result, test.want)
-		}
-	}
-}
+// 	for _, test := range tests {
+// 		atype, bytes, err := ParseHost(test.host)
+// 		if test.wantErr == true && err == nil {
+// 			t.Errorf("%q: expected error but one was not returned", test.name)
+// 		}
+// 		if !reflect.DeepEqual(result, test.want) {
+// 			t.Errorf("%q: unexpected result - got %v, want %v", test.name,
+// 				result, test.want)
+// 		}
+// 	}
+// }
 
 // TestSetServices ensures that a known address' services are updated as
 // expected and that the services field is not mutated when new services are
 // added.
 func TestSetServices(t *testing.T) {
-	addressManager := New("testSetServices", nil)
+	addressManager := New("testSetServices")
 	const services = wire.SFNodeNetwork
 
 	// Attempt to set services for an address not known to the address manager.
-	notKnownAddr := NewNetAddressIPPort(net.ParseIP("1.2.3.4"), 8333, services)
+	notKnownAddr := NewNetAddressFromIPPort(net.ParseIP("1.2.3.4"), 8333, services)
 	err := addressManager.SetServices(notKnownAddr, services)
 	if err == nil {
 		t.Fatal("setting services for unknown address should return error")
 	}
 
 	// Add a new address to the address manager.
-	netAddr := NewNetAddressIPPort(net.ParseIP("1.2.3.4"), 8333, services)
-	srcAddr := NewNetAddressIPPort(net.ParseIP("5.6.7.8"), 8333, services)
+	netAddr := NewNetAddressFromIPPort(net.ParseIP("1.2.3.4"), 8333, services)
+	srcAddr := NewNetAddressFromIPPort(net.ParseIP("5.6.7.8"), 8333, services)
 	addressManager.addOrUpdateAddress(netAddr, srcAddr)
 
 	// Ensure that the services field for a network address returned from the
@@ -892,5 +724,190 @@ func TestSetServices(t *testing.T) {
 	if netAddrB.Services != newServiceFlags {
 		t.Fatalf("netAddrB has invalid services - got %x, want %x",
 			netAddrB.Services, newServiceFlags)
+	}
+}
+
+// TestIsCandidateForExternalNetAddress makes sure that when a remote peer
+// suggests that we are a certain localAddr, that this function can correctly
+// identify if that localAddr is a good candidate to be our public net address.
+// IsCandidateForExternalNetAddress should return the expected boolean, as well
+// as the expected reach the localAddr has to the remoteAddr.
+func TestIsCandidateForExternalNetAddress(t *testing.T) {
+	const unroutableIpv4Address = "0.0.0.0"
+	const unroutableIpv6Address = "::1"
+	const routableIpv4Address = "12.1.2.3"
+	const routableIpv6Address = "2003::"
+	rfc4380IPAddress := rfc4380Net.IP.String()
+	rfc3964IPAddress := rfc3964Net.IP.String()
+	rfc6052IPAddress := rfc6052Net.IP.String()
+	rfc6145IPAddress := rfc6145Net.IP.String()
+
+	tests := []struct {
+		name          string
+		localAddr     string
+		remoteAddr    string
+		expectedValid bool
+		expectedReach NetAddressReach
+	}{
+		{
+			name:          "function called where the remoteAddr is nil",
+			localAddr:     routableIpv4Address,
+			remoteAddr:    "",
+			expectedValid: false,
+			expectedReach: Unreachable,
+		}, {
+			name:          "remote peer suggested a local address",
+			localAddr:     "127.0.0.1",
+			remoteAddr:    routableIpv4Address,
+			expectedValid: false,
+			expectedReach: Unreachable,
+		}, {
+			name:          "torv3 to torv3",
+			localAddr:     torV3AddressString,
+			remoteAddr:    torV3AddressString,
+			expectedValid: true,
+			expectedReach: PrivateTORv3,
+		}, {
+			name:          "routable ipv4 to torv3",
+			localAddr:     routableIpv4Address,
+			remoteAddr:    torV3AddressString,
+			expectedValid: true,
+			expectedReach: Ipv4,
+		}, {
+			name:          "unroutable ipv4 to torv3",
+			localAddr:     unroutableIpv4Address,
+			remoteAddr:    torV3AddressString,
+			expectedValid: false,
+			expectedReach: Default,
+		}, {
+			name:          "routable ipv6 to torv3",
+			localAddr:     routableIpv6Address,
+			remoteAddr:    torV3AddressString,
+			expectedValid: true,
+			expectedReach: Ipv6Weak,
+		}, {
+			name:          "unroutable ipv6 to torv3",
+			localAddr:     unroutableIpv6Address,
+			remoteAddr:    torV3AddressString,
+			expectedValid: false,
+			expectedReach: Default,
+		}, {
+			name:          "rfc4380 to rfc4380",
+			localAddr:     rfc4380IPAddress,
+			remoteAddr:    rfc4380IPAddress,
+			expectedValid: true,
+			expectedReach: Teredo,
+		}, {
+			name:          "unroutable ipv4 to rfc4380",
+			localAddr:     unroutableIpv4Address,
+			remoteAddr:    rfc4380IPAddress,
+			expectedValid: false,
+			expectedReach: Default,
+		}, {
+			name:          "routable ipv4 to rfc4380",
+			localAddr:     routableIpv4Address,
+			remoteAddr:    rfc4380IPAddress,
+			expectedValid: true,
+			expectedReach: Ipv4,
+		}, {
+			name:          "routable ipv6 to rfc4380",
+			localAddr:     routableIpv6Address,
+			remoteAddr:    rfc4380IPAddress,
+			expectedValid: true,
+			expectedReach: Ipv6Weak,
+		}, {
+			name:          "routable ipv4 to routable ipv4",
+			localAddr:     routableIpv4Address,
+			remoteAddr:    routableIpv4Address,
+			expectedValid: true,
+			expectedReach: Ipv4,
+		}, {
+			name:          "routable ipv6 to routable ipv4",
+			localAddr:     routableIpv6Address,
+			remoteAddr:    routableIpv4Address,
+			expectedValid: false,
+			expectedReach: Unreachable,
+		}, {
+			name:          "unroutable ipv4 to routable ipv6",
+			localAddr:     unroutableIpv4Address,
+			remoteAddr:    routableIpv6Address,
+			expectedValid: false,
+			expectedReach: Default,
+		}, {
+			name:          "unroutable ipv6 to routable ipv6",
+			localAddr:     unroutableIpv6Address,
+			remoteAddr:    routableIpv6Address,
+			expectedValid: false,
+			expectedReach: Default,
+		}, {
+			name:          "unroutable ipv4 to routable ipv6",
+			localAddr:     unroutableIpv4Address,
+			remoteAddr:    routableIpv6Address,
+			expectedValid: false,
+			expectedReach: Default,
+		}, {
+			name:          "routable ipv4 to unroutable ipv6",
+			localAddr:     routableIpv4Address,
+			remoteAddr:    unroutableIpv6Address,
+			expectedValid: false,
+			expectedReach: Unreachable,
+		}, {
+			name:          "routable ivp6 rfc4380 to routable ipv6",
+			localAddr:     rfc4380IPAddress,
+			remoteAddr:    routableIpv6Address,
+			expectedValid: true,
+			expectedReach: Teredo,
+		}, {
+			name:          "routable ipv4 to routable ipv6",
+			localAddr:     routableIpv4Address,
+			remoteAddr:    routableIpv6Address,
+			expectedValid: true,
+			expectedReach: Ipv4,
+		}, {
+			name:          "tunnelled ipv6 rfc3964 to routable ipv6",
+			localAddr:     rfc3964IPAddress,
+			remoteAddr:    routableIpv6Address,
+			expectedValid: true,
+			expectedReach: Ipv6Weak,
+		}, {
+			name:          "tunnelled ipv6 rfc6052 to routable ipv6",
+			localAddr:     rfc6052IPAddress,
+			remoteAddr:    routableIpv6Address,
+			expectedValid: true,
+			expectedReach: Ipv6Weak,
+		}, {
+			name:          "tunnelled ipv6 rfc6145 to routable ipv6",
+			localAddr:     rfc6145IPAddress,
+			remoteAddr:    routableIpv6Address,
+			expectedValid: true,
+			expectedReach: Ipv6Weak,
+		},
+		// Unable to design a test to hit this case.
+		{
+			name:          "default case",
+			localAddr:     routableIpv4Address,
+			remoteAddr:    "abc",
+			expectedValid: false,
+			expectedReach: Default,
+		},
+	}
+
+	addressManager := New("TestIsCandidateForExternalNetAddress")
+	for _, test := range tests {
+		localAddrType, localAddrBytes, _ := ParseHost(test.localAddr)
+		remoteAddrType, remoteAddrBytes, _ := ParseHost(test.remoteAddr)
+		localAddr, _ := NewNetAddressFromParams(localAddrType, localAddrBytes, 8333, time.Now(), wire.SFNodeNetwork)
+		remoteAddr, _ := NewNetAddressFromParams(remoteAddrType, remoteAddrBytes, 8333, time.Now(), wire.SFNodeNetwork)
+
+		valid, reach := addressManager.IsCandidateForExternalNetAddress(localAddr, remoteAddr)
+		if valid != test.expectedValid {
+			t.Errorf("%q: unexpected return value for valid - expected '%v', "+
+				"got '%v'", test.name, test.expectedValid, valid)
+			continue
+		}
+		if reach != test.expectedReach {
+			t.Errorf("%q: unexpected return value for reach - expected '%v', "+
+				"got '%v'", test.name, test.expectedReach, reach)
+		}
 	}
 }

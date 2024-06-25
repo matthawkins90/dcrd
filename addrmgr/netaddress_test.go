@@ -1,16 +1,48 @@
-// Copyright (c) 2021 The Decred developers
+// Copyright (c) 2024 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package addrmgr
 
 import (
+	"fmt"
 	"net"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/decred/dcrd/wire"
 )
+
+var (
+	torV3AddressString = "xa4r2iadxm55fbnqgwwi5mymqdcofiu3w6rpbtqn7b2dyn7mgwj64jyd.onion"
+	torV3PubkeyBytes   = []byte{
+		0xb8, 0x39, 0x1d, 0x20, 0x03, 0xbb, 0x3b, 0xd2,
+		0x85, 0xb0, 0x35, 0xac, 0x8e, 0xb3, 0x0c, 0x80,
+		0xc4, 0xe2, 0xa2, 0x9b, 0xb7, 0xa2, 0xf0, 0xce,
+		0x0d, 0xf8, 0x74, 0x3c, 0x37, 0xec, 0x35, 0x93}
+)
+
+// TestIpString verifies that IpString will correctly return the string
+// representation of a NetAddress' IP field.
+func TestIpString(t *testing.T) {
+	// This test only has one test case: for when the NetAddress cannot be
+	// represented as a string.
+	unsupported_addr := NetAddress{
+		Type:      UnknownAddressType,
+		IP:        []byte{0x00},
+		Port:      uint16(0),
+		Timestamp: time.Now(),
+		Services:  wire.SFNodeNetwork,
+	}
+
+	addrStr := unsupported_addr.ipString()
+	expected_str := fmt.Sprintf("unsupported IP type %d, %s, %x",
+		UnknownAddressType, []byte{0x00}, []byte{0x00})
+	if addrStr != expected_str {
+		t.Fatalf("problem: %q", addrStr)
+	}
+}
 
 // TestKey verifies that Key converts a network address to an expected string
 // value.
@@ -78,15 +110,31 @@ func TestKey(t *testing.T) {
 		{ip: "fee2::3:3", port: 8335, want: "[fee2::3:3]:8335"},
 		{ip: "fef3::4:4", port: 8336, want: "[fef3::4:4]:8336"},
 
-		// TORv2
-		{ip: "fd87:d87e:eb43::", port: 8333, want: "aaaaaaaaaaaaaaaa.onion:8333"},
+		// TORv3
+		{
+			ip:   torV3AddressString,
+			port: 8333,
+			want: torV3AddressString + ":8333",
+		},
 	}
 
 	for _, test := range tests {
-		netAddr := NewNetAddressIPPort(net.ParseIP(test.ip), test.port, wire.SFNodeNetwork)
+		host_ip := test.ip
+		addrType, addrBytes, err := ParseHost(host_ip)
+		if err != nil {
+			t.Fatalf("failed to decode host %q: %v", host_ip, err)
+		}
+
+		netAddr, err := NewNetAddressFromParams(addrType, addrBytes, test.port,
+			time.Now(), wire.SFNodeNetwork)
+		if err != nil {
+			t.Fatalf("failed to construct net address from host %q: %v",
+				host_ip, err)
+		}
+
 		key := netAddr.Key()
 		if key != test.want {
-			t.Errorf("unexpected network address key -- got %s, want %s",
+			t.Errorf("unexpected network address key -- got %q, want %q",
 				key, test.want)
 			continue
 		}
@@ -97,7 +145,8 @@ func TestKey(t *testing.T) {
 // created when cloned.
 func TestClone(t *testing.T) {
 	const port = 0
-	netAddr := NewNetAddressIPPort(net.ParseIP("1.2.3.4"), port, wire.SFNodeNetwork)
+	netAddr := NewNetAddressFromIPPort(net.ParseIP("1.2.3.4"), port,
+		wire.SFNodeNetwork)
 	netAddrClone := netAddr.Clone()
 
 	if netAddr == netAddrClone {
@@ -113,11 +162,163 @@ func TestClone(t *testing.T) {
 // network address instance.
 func TestAddService(t *testing.T) {
 	const port = 0
-	netAddr := NewNetAddressIPPort(net.ParseIP("1.2.3.4"), port, wire.SFNodeNetwork)
+	netAddr := NewNetAddressFromIPPort(net.ParseIP("1.2.3.4"), port,
+		wire.SFNodeNetwork)
 	netAddr.AddService(wire.SFNodeNetwork)
 
 	if netAddr.Services != wire.SFNodeNetwork {
 		t.Fatalf("expected service flag to be set -- got %x, want %x",
 			netAddr.Services, wire.SFNodeNetwork)
+	}
+}
+
+// TestNewNetAddressFromParams verifies that the NewNetAddressFromParams
+// constructor correctly creates a network address with expected field values.
+func TestNewNetAddressFromParams(t *testing.T) {
+	const port = 8345
+	const services = wire.SFNodeNetwork
+	timestamp := time.Unix(time.Now().Unix(), 0)
+
+	tests := []struct {
+		name           string
+		addrType       NetAddressType
+		addrBytes      []byte
+		want           *NetAddress
+		error_expected bool
+	}{
+		{
+			name:      "4 byte ipv4 address stored as 4 byte ip",
+			addrType:  IPv4Address,
+			addrBytes: net.ParseIP("127.0.0.1").To4(),
+			want: &NetAddress{
+				IP:        []byte{0x7f, 0x00, 0x00, 0x01},
+				Port:      port,
+				Services:  services,
+				Timestamp: timestamp,
+				Type:      IPv4Address,
+			},
+			error_expected: false,
+		},
+		{
+			name:      "16 byte ipv4 address stored as 4 byte ip",
+			addrType:  IPv4Address,
+			addrBytes: net.ParseIP("127.0.0.1").To16(),
+			want: &NetAddress{
+				IP:        []byte{0x7f, 0x00, 0x00, 0x01},
+				Port:      port,
+				Services:  services,
+				Timestamp: timestamp,
+				Type:      IPv4Address,
+			},
+			error_expected: false,
+		},
+		{
+			name:      "16 byte ipv6 address stored in 16 bytes",
+			addrType:  IPv6Address,
+			addrBytes: net.ParseIP("::1"),
+			want: &NetAddress{
+				IP: []byte{
+					0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+					0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
+				Port:      port,
+				Services:  services,
+				Timestamp: timestamp,
+				Type:      IPv6Address,
+			},
+			error_expected: false,
+		},
+		{
+			name:      "32 byte TORv3 address stored in 32 bytes",
+			addrType:  TORv3Address,
+			addrBytes: torV3PubkeyBytes,
+			want: &NetAddress{
+				IP:        torV3PubkeyBytes,
+				Port:      port,
+				Services:  services,
+				Timestamp: timestamp,
+				Type:      TORv3Address,
+			},
+			error_expected: false,
+		},
+		{
+			name:           "Error: Cannot derive net address type",
+			addrType:       UnknownAddressType,
+			addrBytes:      []byte{0x01, 0x02, 0x03},
+			want:           nil,
+			error_expected: true,
+		},
+		{
+			name:           "Error: the provided type doesn't match the bytes",
+			addrType:       TORv3Address,
+			addrBytes:      net.ParseIP("127.0.0.1").To4(),
+			want:           nil,
+			error_expected: true,
+		},
+		{
+			name:           "Error: no address bytes were provided",
+			addrType:       UnknownAddressType,
+			addrBytes:      nil,
+			want:           nil,
+			error_expected: true,
+		}}
+
+	for _, test := range tests {
+		addr, err := NewNetAddressFromParams(test.addrType, test.addrBytes,
+			port, timestamp, services)
+		if err != nil && test.error_expected == false {
+			t.Fatalf("%q: unexpected error - %v", test.name, err)
+		}
+		if !reflect.DeepEqual(addr, test.want) {
+			t.Errorf("%q: mismatched entries\ngot  %+v\nwant %+v", test.name,
+				addr, test.want)
+		}
+	}
+}
+
+// TestNewNetAddressFromString verifies that the newNetAddressFromString
+// constructor correctly creates a network address with expected field values.
+func TestNewNetAddressFromString(t *testing.T) {
+	amgr := New("TestNewNetAddressFromString")
+	tests := []struct {
+		name           string
+		addrString     string
+		want           *NetAddress
+		error_expected bool
+	}{
+		{
+			name:           "Error: cannot split host:port",
+			addrString:     "1.2.3.4",
+			want:           nil,
+			error_expected: true,
+		},
+		{
+			name:           "Error: cannot parse the port as a uint64",
+			addrString:     "1.2.3.4:abc",
+			want:           nil,
+			error_expected: true,
+		},
+		{
+			name:           "Error: ParseHost errored because the IP was not base32.StdEncoding",
+			addrString:     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA!@.onion:8345",
+			want:           nil,
+			error_expected: true,
+		},
+		{
+			name:           "Error: ParseHost did not error, but returned UnknownAddressType",
+			addrString:     "abc:8345",
+			want:           nil,
+			error_expected: true,
+		},
+	}
+
+	for _, test := range tests {
+		addr, err := amgr.newNetAddressFromString(test.addrString)
+		if err != nil && test.error_expected == false {
+			t.Fatalf("%q: unexpected error - %v", test.name, err)
+		}
+		if addr != test.want {
+			t.Errorf("%q: unexpected NetAddress\ngot	%+v\nwant	%+v",
+				test.name, addr, test.want)
+		}
 	}
 }

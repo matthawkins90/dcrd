@@ -37,11 +37,6 @@ type AddrManager struct {
 	// is saved to and loaded from.
 	peersFile string
 
-	// lookupFunc is a function provided to the address manager that is used to
-	// perform DNS lookups for a given hostname.
-	// The provided function MUST be safe for concurrent access.
-	lookupFunc func(string) ([]net.IP, error)
-
 	// key is a random seed used to map addresses to new and tried buckets.
 	key [32]byte
 
@@ -541,12 +536,12 @@ func (a *AddrManager) deserializePeers(filePath string) error {
 	copy(a.key[:], sam.Key[:])
 
 	for _, v := range sam.Addresses {
-		netAddr, err := a.newAddressFromString(v.Addr)
+		netAddr, err := a.newNetAddressFromString(v.Addr)
 		if err != nil {
 			return fmt.Errorf("failed to deserialize netaddress %s: %w", v.Addr,
 				err)
 		}
-		srcAddr, err := a.newAddressFromString(v.Src)
+		srcAddr, err := a.newNetAddressFromString(v.Src)
 		if err != nil {
 			return fmt.Errorf("failed to deserialize netaddress %s: %w", v.Src,
 				err)
@@ -740,42 +735,44 @@ func (a *AddrManager) reset() {
 	}
 }
 
-// HostToNetAddress parses and returns a network address given a hostname in a
-// supported format (IPv4, IPv6, TORv2).  If the hostname cannot be immediately
-// converted from a known address format, it will be resolved using the lookup
-// function provided to the address manager. If it cannot be resolved, an error
-// is returned.
-//
-// This function is safe for concurrent access.
-func (a *AddrManager) HostToNetAddress(host string, port uint16, services wire.ServiceFlag) (*NetAddress, error) {
-	// Tor address is 16 char base32 + ".onion"
-	var ip net.IP
-	if len(host) == 22 && host[16:] == ".onion" {
-		// go base32 encoding uses capitals (as does the rfc
-		// but Tor and bitcoind tend to user lowercase, so we switch
-		// case here.
-		data, err := base32.StdEncoding.DecodeString(
-			strings.ToUpper(host[:16]))
-		if err != nil {
-			return nil, err
+// ParseHost deconstructs a given host address to its []byte representation
+// and also returns the network address type. If an error occurs while decoding
+// an onion address, the error is returned. If the host cannot be decoded, then
+// an unknown address type is returned without error.
+func ParseHost(host string) (NetAddressType, []byte, error) {
+	// Look for TORv3 addresses first and return early if successful.
+	// TORv3 addresses (hidden service names) are 56 char base32 + ".onion".
+	// Note that, as per the TORv3 spec, ".onion" is expected to be lowercase.
+	if strings.HasSuffix(host, ".onion") {
+		if len(host) == 62 {
+			// go base32 encoding uses uppercase (as does the rfc), but TOR and
+			// bitcoind tend to user lowercase, so we convert to uppercase here.
+			torAddressBytes, err := base32.StdEncoding.DecodeString(
+				strings.ToUpper(host[:56]))
+			if err != nil {
+				return UnknownAddressType, nil, err
+			}
+			if pubkey, valid := isTORv3(torAddressBytes); valid {
+				// The net address bytes returned is the 32 byte pubkey,
+				// not the entire 35 byte onion address.
+				return TORv3Address, pubkey, nil
+			}
 		}
-		prefix := []byte{0xfd, 0x87, 0xd8, 0x7e, 0xeb, 0x43}
-		ip = net.IP(append(prefix, data...))
-	} else if ip = net.ParseIP(host); ip == nil {
-		ips, err := a.lookupFunc(host)
-		if err != nil {
-			return nil, err
-		}
-		if len(ips) == 0 {
-			return nil, fmt.Errorf("no addresses found for %s", host)
-		}
-		ip = ips[0]
 	}
 
-	return NewNetAddressIPPort(ip, port, services), nil
+	// Look for IPv4 or IPv6 addresses next
+	if ip := net.ParseIP(host); ip != nil {
+		if isIPv4(ip) {
+			return IPv4Address, ip.To4(), nil
+		}
+		return IPv6Address, ip, nil
+	}
+
+	// The given host address could not be recognized
+	return UnknownAddressType, nil, nil
 }
 
-// GetAddress returns a single address that should be routable.  It picks a
+// GetAddress returns a single address that should be routable. It picks a
 // random one from the possible addresses with preference given to ones that
 // have not been used recently and should not pick 'close' addresses
 // consecutively.
@@ -1087,96 +1084,105 @@ const (
 	// between two addresses.
 	Unreachable NetAddressReach = 0
 
-	// Default represents the default connection state between
-	// two addresses.
+	// Default represents the default connection state between two addresses.
 	Default NetAddressReach = iota
 
 	// Teredo represents a connection state between two RFC4380 addresses.
 	Teredo
 
-	// Ipv6Weak represents a weak IPV6 connection state between two
-	// addresses.
+	// Ipv6Weak represents a weak IPV6 connection state between two addresses.
 	Ipv6Weak
 
-	// Ipv4 represents an IPV4 connection state between two addresses.
+	// Ipv4 represents a connection state between two IPv4 addresses.
 	Ipv4
 
-	// Ipv6Strong represents a connection state between two IPV6 addresses.
+	// Ipv6Strong represents a connection state between two IPv6 addresses.
 	Ipv6Strong
 
-	// Private represents a connection state connect between two Tor addresses.
-	Private
+	// PrivateTORv3 represents a connection state between two TORv3 addresses.
+	PrivateTORv3
+
+	// PrivateI2P represents a connection state between two I2P addresses.
+	PrivateI2P
 )
 
-// getReachabilityFrom returns the relative reachability of the provided local
-// address to the provided remote address.
+// getRemoteReachabilityFromLocal returns the type of connection reachability
+// from a local address to a remote address.
 //
 // This function is safe for concurrent access.
-func getReachabilityFrom(localAddr, remoteAddr *NetAddress) NetAddressReach {
-	if !remoteAddr.IsRoutable() {
+func getRemoteReachabilityFromLocal(localAddr, remoteAddr *NetAddress) NetAddressReach {
+	switch {
+	case remoteAddr == nil || localAddr == nil:
 		return Unreachable
-	}
 
-	if isOnionCatTor(remoteAddr.IP) {
-		if isOnionCatTor(localAddr.IP) {
-			return Private
-		}
+	case !remoteAddr.IsRoutable():
+		return Unreachable
 
-		if localAddr.IsRoutable() && isIPv4(localAddr.IP) {
+	case remoteAddr.Type == TORv3Address:
+		switch {
+		case localAddr.Type == TORv3Address:
+			return PrivateTORv3
+
+		// Tor relays can be reached by IPv4
+		case localAddr.Type == IPv4Address && localAddr.IsRoutable():
 			return Ipv4
-		}
 
-		return Default
-	}
+		// As of Tor v0.4.5.1-alpha (2020), Tor relays can be reached by IPv6
+		case localAddr.Type == IPv6Address && localAddr.IsRoutable():
+			return Ipv6Weak
 
-	if isRFC4380(remoteAddr.IP) {
-		if !localAddr.IsRoutable() {
+		default:
 			return Default
 		}
 
-		if isRFC4380(localAddr.IP) {
+	case isRFC4380(remoteAddr.IP):
+		switch {
+		case !localAddr.IsRoutable():
+			return Default
+
+		case isRFC4380(localAddr.IP):
 			return Teredo
-		}
 
-		if isIPv4(localAddr.IP) {
+		case localAddr.Type == IPv4Address:
 			return Ipv4
+
+		default:
+			return Ipv6Weak
 		}
 
-		return Ipv6Weak
-	}
-
-	if isIPv4(remoteAddr.IP) {
-		if localAddr.IsRoutable() && isIPv4(localAddr.IP) {
+	case remoteAddr.Type == IPv4Address:
+		switch {
+		case localAddr.IsRoutable() && localAddr.Type == IPv4Address:
 			return Ipv4
+
+		default:
+			return Unreachable
 		}
-		return Unreachable
-	}
 
-	/* ipv6 */
-	var tunnelled bool
-	// Is our v6 tunnelled?
-	if isRFC3964(localAddr.IP) || isRFC6052(localAddr.IP) || isRFC6145(localAddr.IP) {
-		tunnelled = true
-	}
+	case remoteAddr.Type == IPv6Address:
+		switch {
+		case !localAddr.IsRoutable():
+			return Default
 
-	if !localAddr.IsRoutable() {
+		case isRFC4380(localAddr.IP):
+			return Teredo
+
+		case localAddr.Type == IPv4Address:
+			return Ipv4
+
+		// Is our IPv6 tunneled?
+		case isRFC3964(localAddr.IP) || isRFC6052(localAddr.IP) ||
+			isRFC6145(localAddr.IP):
+			// only prioritize ipv6 if we aren't tunnelling it.
+			return Ipv6Weak
+
+		default:
+			return Ipv6Strong
+		}
+
+	default:
 		return Default
 	}
-
-	if isRFC4380(localAddr.IP) {
-		return Teredo
-	}
-
-	if isIPv4(localAddr.IP) {
-		return Ipv4
-	}
-
-	if tunnelled {
-		// only prioritise ipv6 if we aren't tunnelling it.
-		return Ipv6Weak
-	}
-
-	return Ipv6Strong
 }
 
 // GetBestLocalAddress returns the most appropriate local address to use
@@ -1191,7 +1197,7 @@ func (a *AddrManager) GetBestLocalAddress(remoteAddr *NetAddress) *NetAddress {
 	var bestscore AddressPriority
 	var bestAddress *NetAddress
 	for _, la := range a.localAddresses {
-		reach := getReachabilityFrom(la.na, remoteAddr)
+		reach := getRemoteReachabilityFromLocal(la.na, remoteAddr)
 		if reach > bestreach ||
 			(reach == bestreach && la.score > bestscore) {
 			bestreach = reach
@@ -1207,37 +1213,59 @@ func (a *AddrManager) GetBestLocalAddress(remoteAddr *NetAddress) *NetAddress {
 
 		// Send something unroutable if nothing suitable.
 		var ip net.IP
-		if !isIPv4(remoteAddr.IP) && !isOnionCatTor(remoteAddr.IP) {
+		if remoteAddr.Type != IPv4Address {
 			ip = net.IPv6zero
 		} else {
 			ip = net.IPv4zero
 		}
-		bestAddress = NewNetAddressIPPort(ip, 0, wire.SFNodeNetwork)
+		bestAddress = NewNetAddressFromIPPort(ip, 0, wire.SFNodeNetwork)
 	}
 
 	return bestAddress
 }
 
-// ValidatePeerNa returns the validity and reachability of the
-// provided local address based on its routablility and reachability
-// from the peer that suggested it.
+// When a remote peer suggests a Net address for this local node,
+// IsCandidateForExternalNetAddress will return a boolean representing whether
+// the suggested address is actually a good candidate for this local node's
+// public external Net address. In addition,
+// IsCandidateForExternalNetAddress will return the reachability of the remote
+// address from the local address.
 //
 // This function is safe for concurrent access.
-func (a *AddrManager) ValidatePeerNa(localAddr, remoteAddr *NetAddress) (bool, NetAddressReach) {
-	net := addressType(localAddr.IP)
-	reach := getReachabilityFrom(localAddr, remoteAddr)
-	valid := (net == IPv4Address && reach == Ipv4) || (net == IPv6Address &&
-		(reach == Ipv6Weak || reach == Ipv6Strong || reach == Teredo))
-	return valid, reach
+func (a *AddrManager) IsCandidateForExternalNetAddress(localAddr, remoteAddr *NetAddress) (bool, NetAddressReach) {
+	// Nodes need to know what their own public Net addresses are. To avoid
+	// having to ask a centralized server, nodes listen to what remote peers say
+	// they see them as (i.e. localAddr).
+
+	// Get the reachability from our node's potential localAddr to the remote.
+	reach := getRemoteReachabilityFromLocal(localAddr, remoteAddr)
+
+	// Return early with reach if the remote peer suggested a local address.
+	if isLocal(localAddr.IP) {
+		return false, reach
+	}
+
+	net := localAddr.Type
+
+	// Good reach means the local address can reach the remote address
+	localIPv4WithGoodReach := (net == IPv4Address && (reach == Ipv4 ||
+		reach == Default))
+	localIPv6WithGoodReach := (net == IPv6Address && (reach == Ipv6Weak ||
+		reach == Ipv6Strong || reach == Teredo || reach == Default))
+	localTORv3WithGoodReach := (net == TORv3Address && (reach == PrivateTORv3 ||
+		reach == Default))
+
+	goodReach := localIPv4WithGoodReach || localIPv6WithGoodReach ||
+		localTORv3WithGoodReach
+
+	return goodReach, reach
 }
 
 // New constructs a new address manager instance.
 // Use Start to begin processing asynchronous address updates.
-// The address manager uses lookupFunc for necessary DNS lookups.
-func New(dataDir string, lookupFunc func(string) ([]net.IP, error)) *AddrManager {
+func New(dataDir string) *AddrManager {
 	am := AddrManager{
 		peersFile:       filepath.Join(dataDir, peersFilename),
-		lookupFunc:      lookupFunc,
 		quit:            make(chan struct{}),
 		localAddresses:  make(map[string]*localAddress),
 		triedBucketSize: defaultTriedBucketSize,
