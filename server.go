@@ -2405,6 +2405,8 @@ func (s *server) handleAddPeer(sp *serverPeer) bool {
 		return false
 	}
 
+	// This is (potentially) our own public net address, unless the external
+	// peer is lying.
 	na := sp.peerNa.Load()
 
 	// Add the new peer.
@@ -2466,8 +2468,13 @@ func (s *server) handleAddPeer(sp *serverPeer) bool {
 		}
 
 		localAddr := wireToAddrmgrNetAddress(na)
-		valid, reach := s.addrManager.ValidatePeerNa(localAddr, remoteAddr)
-		if !valid {
+		goodReach, reach := s.addrManager.IsCandidateForExternalNetAddress(
+			localAddr, remoteAddr)
+		if !goodReach {
+			// The remote peer suggested that our address is localAddr. But if
+			// the localAddr cannot reach the remoteAddr, then it's not useful,
+			// so we don't track it. However, we've still added the peer, so we
+			// return true.
 			return true
 		}
 

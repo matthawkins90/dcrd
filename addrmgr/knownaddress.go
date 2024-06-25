@@ -26,7 +26,7 @@ type KnownAddress struct {
 	srcAddr *NetAddress
 
 	// The following fields track the attempts made to connect to the primary
-	// network address.  Initially connecting to a peer counts as an attempt,
+	// network address. Initially connecting to a peer counts as an attempt,
 	// and a successful version message exchange resets the number of attempts
 	// to zero.
 	attempts    int
@@ -37,12 +37,12 @@ type KnownAddress struct {
 	tried bool
 
 	// refs represents the total number of new buckets that the known address
-	// exists in.  This is updated as the address moves between new and tried
+	// exists in. This is updated as the address moves between new and tried
 	// buckets.
 	refs int
 }
 
-// NetAddress returns the underlying wire.NetAddress associated with the
+// NetAddress returns the underlying addrmgr.NetAddress associated with the
 // known address.
 func (ka *KnownAddress) NetAddress() *NetAddress {
 	ka.mtx.Lock()
@@ -57,9 +57,9 @@ func (ka *KnownAddress) LastAttempt() time.Time {
 	return ka.lastattempt
 }
 
-// chance returns the selection probability for a known address.  The priority
+// chance returns the selection probability for a known address. The priority
 // depends upon how recently the address has been seen, how recently it was last
-// attempted and how often attempts to connect to it have failed.
+// attempted, and how often attempts to connect to it have failed.
 func (ka *KnownAddress) chance() float64 {
 	ka.mtx.Lock()
 	defer ka.mtx.Unlock()
@@ -83,36 +83,36 @@ func (ka *KnownAddress) chance() float64 {
 // 2) It hasn't been seen in over a month
 // 3) It has failed at least three times and never succeeded
 // 4) It has failed a total of maxFailures in the last week
-// All addresses that meet these criteria are assumed to be worthless and not
-// worth keeping hold of.
+// An address that meets any of these criteria is assumed to be worthless.
 func (ka *KnownAddress) isBad() bool {
 	ka.mtx.Lock()
 	defer ka.mtx.Unlock()
 	now := time.Now()
-	if ka.lastattempt.After(now.Add(-1 * time.Minute)) {
+
+	switch {
+
+	// Wait a minute after the last check
+	case ka.lastattempt.After(now.Add(-1 * time.Minute)):
 		return false
-	}
 
 	// From the future?
-	if ka.na.Timestamp.After(now.Add(10 * time.Minute)) {
+	case ka.na.Timestamp.After(now.Add(10 * time.Minute)):
 		return true
-	}
 
 	// Over a month old?
-	if ka.na.Timestamp.Before(now.Add(-1 * numMissingDays * time.Hour * 24)) {
+	case ka.na.Timestamp.Before(now.Add(-1 * numMissingDays * time.Hour * 24)):
 		return true
-	}
 
 	// Never succeeded?
-	if ka.lastsuccess.IsZero() && ka.attempts >= numRetries {
+	case ka.lastsuccess.IsZero() && ka.attempts >= numRetries:
 		return true
-	}
 
 	// Hasn't succeeded in too long?
-	if !ka.lastsuccess.After(now.Add(-1*minBadDays*time.Hour*24)) &&
-		ka.attempts >= maxFailures {
+	case !ka.lastsuccess.After(now.Add(-1*minBadDays*time.Hour*24)) &&
+		ka.attempts >= maxFailures:
 		return true
-	}
 
-	return false
+	default:
+		return false
+	}
 }

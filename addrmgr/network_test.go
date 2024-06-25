@@ -1,13 +1,15 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015-2021 The Decred developers
+// Copyright (c) 2015-2024 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package addrmgr
 
 import (
+	"bytes"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/decred/dcrd/wire"
 )
@@ -141,6 +143,68 @@ func TestIPTypes(t *testing.T) {
 	}
 }
 
+// TestIsTorV3 tests the isTorV3 function to ensure it can properly identify
+// whether or not various addresses match the TORv3 spec.
+func TestIsTorV3(t *testing.T) {
+	tests := []struct {
+		name            string
+		input_bytes     []byte
+		expected_pubkey []byte
+		expected_bool   bool
+	}{
+		{
+			name:            "Valid TORv3 address",
+			input_bytes:     append(torV3PubkeyBytes, 0xEE, 0x27, torV3VersionByte),
+			expected_pubkey: torV3PubkeyBytes,
+			expected_bool:   true,
+		},
+		{
+			name: "Empty pubkey, but still valid",
+			input_bytes: []byte{
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0xCD, 0x0E, torV3VersionByte,
+			},
+			expected_pubkey: []byte{
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			},
+			expected_bool: true,
+		},
+		{
+			name:            "Incorrect length",
+			input_bytes:     []byte{0x01, 0x02, 0x03},
+			expected_pubkey: nil,
+			expected_bool:   false,
+		},
+		{
+			name:            "Wrong version byte",
+			input_bytes:     append(torV3PubkeyBytes, 0xEE, 0x27, 0x01),
+			expected_pubkey: nil,
+			expected_bool:   false,
+		},
+		{
+			name:            "Computed checksum doesn't match input checksum",
+			input_bytes:     append(torV3PubkeyBytes, 0x00, 0x00, torV3VersionByte),
+			expected_pubkey: nil,
+			expected_bool:   false,
+		},
+	}
+
+	for _, test := range tests {
+		pubkey, valid := isTORv3(test.input_bytes)
+		if !bytes.Equal(pubkey, test.expected_pubkey) || valid != test.expected_bool {
+			t.Errorf("%q: unexpected result: got pubkey: %v, valid: %v;"+
+				"expected pubkey: %v, expected_bool: %v", test.name, pubkey,
+				valid, test.expected_pubkey, test.expected_bool)
+		}
+	}
+}
+
 // TestGroupKey tests the GroupKey function to ensure it properly groups various
 // IP addresses.
 func TestGroupKey(t *testing.T) {
@@ -177,24 +241,25 @@ func TestGroupKey(t *testing.T) {
 		{name: "ipv6 rfc6052 well-known prefix with ipv4", ip: "64:ff9b::0c01:0203", expected: "12.1.0.0"},
 		{name: "ipv6 rfc6145 translated ipv4", ip: "::ffff:0:0c01:0203", expected: "12.1.0.0"},
 
-		// Tor.
-		{name: "ipv6 tor onioncat", ip: "fd87:d87e:eb43:1234::5678", expected: "tor:2"},
-		{name: "ipv6 tor onioncat 2", ip: "fd87:d87e:eb43:1245::6789", expected: "tor:2"},
-		{name: "ipv6 tor onioncat 3", ip: "fd87:d87e:eb43:1345::6789", expected: "tor:3"},
-
 		// IPv6 normal.
 		{name: "ipv6 normal", ip: "2602:100::1", expected: "2602:100::"},
 		{name: "ipv6 normal 2", ip: "2602:0100::1234", expected: "2602:100::"},
 		{name: "ipv6 hurricane electric", ip: "2001:470:1f10:a1::2", expected: "2001:470:1000::"},
 		{name: "ipv6 hurricane electric 2", ip: "2001:0470:1f10:a1::2", expected: "2001:470:1000::"},
+
+		// TORv3
+		{name: "TORv3", ip: "xa4r2iadxm55fbnqgwwi5mymqdcofiu3w6rpbtqn7b2dyn7mgwj64jyd.onion", expected: "torv3:8"},
 	}
 
-	for i, test := range tests {
-		nip := net.ParseIP(test.ip)
-		na := NewNetAddressIPPort(nip, 8333, wire.SFNodeNetwork)
-		if key := na.GroupKey(); key != test.expected {
-			t.Errorf("TestGroupKey #%d (%s): unexpected group key "+
-				"- got '%s', want '%s'", i, test.name, key, test.expected)
+	for _, test := range tests {
+		addrType, addrBytes, err := ParseHost(test.ip)
+		if err != nil {
+			t.Fatalf("failed to decode host %q: %v", test.ip, err)
+		}
+		netAddress, _ := NewNetAddressFromParams(addrType, addrBytes, 8333, time.Now(), wire.SFNodeNetwork)
+		actualkey := netAddress.GroupKey()
+		if actualkey != test.expected {
+			t.Errorf("%q: unexpected group key - got %q, expected: %q", test.name, actualkey, test.expected)
 		}
 	}
 }
