@@ -31,7 +31,7 @@ generally helps provide greater peer diversity. More importantly, it drastically
 reduces the chances that an attacker could coerce your peer into connecting only
 to nodes they control.
 
-The address manager also understands routability and TORv3 addresses, and tries
+The address manager also understands routability and TorV3 addresses, and tries
 hard to only return routable addresses. In addition, it uses the information
 provided by the caller about connected, known good, and attempted addresses to
 periodically purge peers which no longer appear to be good, as well as to bias

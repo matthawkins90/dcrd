@@ -13,7 +13,7 @@ import (
 )
 
 // torV3VersionByte represents the version byte used when encoding and decoding
-// a TORv3 host name.
+// a TorV3 host name.
 const torV3VersionByte = byte(3)
 
 var (
@@ -101,7 +101,7 @@ func isLocal(netIP net.IP) bool {
 	return netIP.IsLoopback() || zero4Net.Contains(netIP)
 }
 
-// NetAddressType represents the type of an address (IPv4, IPv6, TOR, etc.).
+// NetAddressType represents the type of an address (IPv4, IPv6, Tor, etc.).
 type NetAddressType uint8
 
 // NOTE: This specifically does not use iota since the NetAddressType is used in
@@ -111,8 +111,8 @@ const (
 	UnknownAddressType NetAddressType = 0
 	IPv4Address        NetAddressType = 1
 	IPv6Address        NetAddressType = 2
-	// TORv2Address       NetAddressType = 3  // No longer supported
-	TORv3Address NetAddressType = 4
+	// TorV2Address       NetAddressType = 3  // No longer supported
+	TorV3Address NetAddressType = 4
 	I2PAddress   NetAddressType = 5
 )
 
@@ -207,8 +207,8 @@ func isRFC6598(netIP net.IP) bool {
 	return rfc6598Net.Contains(netIP)
 }
 
-// calcTORv3Checksum returns the checksum bytes given a 32 byte TORv3 public key.
-func calcTORv3Checksum(publicKey [32]byte) [2]byte {
+// calcTorV3Checksum returns the checksum bytes given a 32 byte TorV3 public key.
+func calcTorV3Checksum(publicKey [32]byte) [2]byte {
 	const (
 		prefix    = ".onion checksum"
 		prefixLen = len(prefix)
@@ -225,10 +225,10 @@ func calcTORv3Checksum(publicKey [32]byte) [2]byte {
 	return result
 }
 
-// isTORv3 returns whether or not the given address is a valid TORv3 address
+// isTorV3 returns whether or not the given address is a valid TorV3 address
 // with the checksum and version bytes. If it is valid, it also returns the
-// public key of the TORv3 address.
-func isTORv3(addressBytes []byte) ([]byte, bool) {
+// public key of the TorV3 address.
+func isTorV3(addressBytes []byte) ([]byte, bool) {
 	if len(addressBytes) != 35 {
 		return nil, false
 	}
@@ -243,7 +243,7 @@ func isTORv3(addressBytes []byte) ([]byte, bool) {
 	var checksum [2]byte
 	copy(checksum[:], addressBytes[32:34])
 
-	computedChecksum := calcTORv3Checksum(publicKey)
+	computedChecksum := calcTorV3Checksum(publicKey)
 	if computedChecksum != checksum {
 		return nil, false
 	}
@@ -275,7 +275,7 @@ func IsRoutable(netIP net.IP) bool {
 // GroupKey returns a string representing the network group an address is part
 // of.  This is the /16 for IPv4, the /32 (/36 for he.net) for IPv6, the string
 // "local" for a local address, the string "torv3:key" where the key is the
-// first 4 bits of the pubkey for TORv3 addresses, and the string "unroutable"
+// first 4 bits of the pubkey for TorV3 addresses, and the string "unroutable"
 // for an unroutable address.
 func (na *NetAddress) GroupKey() string {
 	netIP := net.IP(na.IP)
@@ -307,7 +307,7 @@ func (na *NetAddress) GroupKey() string {
 		}
 		return newIP.Mask(net.CIDRMask(16, 32)).String()
 	}
-	if na.Type == TORv3Address {
+	if na.Type == TorV3Address {
 		// group is keyed off the first 4 bits of the public key.
 		return fmt.Sprintf("torv3:%d", netIP[0]&((1<<4)-1))
 	}

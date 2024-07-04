@@ -144,7 +144,7 @@ func TestIPTypes(t *testing.T) {
 }
 
 // TestIsTorV3 tests the isTorV3 function to ensure it can properly identify
-// whether or not various addresses match the TORv3 spec.
+// whether or not various addresses match the TorV3 spec.
 func TestIsTorV3(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -153,7 +153,7 @@ func TestIsTorV3(t *testing.T) {
 		expected_bool   bool
 	}{
 		{
-			name:            "Valid TORv3 address",
+			name:            "Valid TorV3 address",
 			input_bytes:     append(torV3PubkeyBytes, 0xEE, 0x27, torV3VersionByte),
 			expected_pubkey: torV3PubkeyBytes,
 			expected_bool:   true,
@@ -196,7 +196,7 @@ func TestIsTorV3(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		pubkey, valid := isTORv3(test.input_bytes)
+		pubkey, valid := isTorV3(test.input_bytes)
 		if !bytes.Equal(pubkey, test.expected_pubkey) || valid != test.expected_bool {
 			t.Errorf("%q: unexpected result: got pubkey: %v, valid: %v;"+
 				"expected pubkey: %v, expected_bool: %v", test.name, pubkey,
@@ -247,8 +247,8 @@ func TestGroupKey(t *testing.T) {
 		{name: "ipv6 hurricane electric", ip: "2001:470:1f10:a1::2", expected: "2001:470:1000::"},
 		{name: "ipv6 hurricane electric 2", ip: "2001:0470:1f10:a1::2", expected: "2001:470:1000::"},
 
-		// TORv3
-		{name: "TORv3", ip: "xa4r2iadxm55fbnqgwwi5mymqdcofiu3w6rpbtqn7b2dyn7mgwj64jyd.onion", expected: "torv3:8"},
+		// TorV3
+		{name: "TorV3", ip: "xa4r2iadxm55fbnqgwwi5mymqdcofiu3w6rpbtqn7b2dyn7mgwj64jyd.onion", expected: "torv3:8"},
 	}
 
 	for _, test := range tests {

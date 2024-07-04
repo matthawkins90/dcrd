@@ -17,7 +17,7 @@ import (
 
 // NetAddress defines information about a peer on the network.
 type NetAddress struct {
-	// Type represents the type of an address (IPv4, IPv6, TOR, etc.).
+	// Type represents the type of an address (IPv4, IPv6, Tor, etc.).
 	Type NetAddressType
 
 	// IP address of the peer. It is defined as a byte array to support various
@@ -38,34 +38,31 @@ type NetAddress struct {
 // IsRoutable returns a boolean indicating whether the network address is
 // routable.
 func (netAddr *NetAddress) IsRoutable() bool {
-	if netAddr == nil {
-		return false
-	}
 	return IsRoutable(netAddr.IP)
 }
 
 // ipString returns a string representation of the network address' IP field.
-// If the ip is in the range used for TOR addresses then it will be transformed
+// If the ip is in the range used for Tor addresses then it will be transformed
 // into the respective .onion address. It does not include the port.
 func (netAddr *NetAddress) ipString() string {
 	netIP := netAddr.IP
 	switch netAddr.Type {
-	case TORv3Address:
-		// A TORv3 onion address is 35 bytes total:
+	case TorV3Address:
+		// A TorV3 onion address is 35 bytes total:
 		// A 32 byte pubkey, then a 2 byte checksum, then a 1 byte version.
 
-		// By default, the address manager parses and stores TORv3 address as
+		// By default, the address manager parses and stores TorV3 address as
 		// the 32 byte pubkey only. Therefore, it is safe to assume that the
 		// input netIP is not the full 35 byte onion address and will need to
 		// be constructed from the pubkey.
 		if len(netIP) == 32 {
 			var pubkey [32]byte
 			copy(pubkey[:], netIP)                // Already had the pubkey
-			checksum := calcTORv3Checksum(pubkey) // Generate the checksum
+			checksum := calcTorV3Checksum(pubkey) // Generate the checksum
 			var fullAddress [35]byte
 			copy(fullAddress[:32], pubkey[:])
 			copy(fullAddress[32:], checksum[:])
-			fullAddress[34] = 3 // Set the version byte for TORv3
+			fullAddress[34] = 3 // Set the version byte for TorV3
 
 			base32 := base32.StdEncoding.EncodeToString(fullAddress[:])
 			return strings.ToLower(base32) + ".onion"
@@ -120,7 +117,7 @@ func canonicalizeIP(addrType NetAddressType, addrBytes []byte) []byte {
 	case addrType == IPv6Address:
 		return net.IP(addrBytes).To16()
 	}
-	// Given a TOR address (or other), the bytes are returned unchanged.
+	// Given a Tor address (or other), the bytes are returned unchanged.
 	return addrBytes
 }
 
@@ -133,8 +130,8 @@ func deriveNetAddressType(claimedType NetAddressType, addrBytes []byte) (NetAddr
 		return IPv4Address, nil
 	case len == 16:
 		return IPv6Address, nil
-	case len == 32 && claimedType == TORv3Address:
-		return TORv3Address, nil
+	case len == 32 && claimedType == TorV3Address:
+		return TorV3Address, nil
 	}
 	str := fmt.Sprintf("unable to determine address type from raw network "+
 		"address bytes: %v", addrBytes)
@@ -203,7 +200,7 @@ func (a *AddrManager) newNetAddressFromString(addr string) (*NetAddress, error) 
 // the supported service flags for the address. The provided ip MUST be a valid
 // IPv4 or IPv6 address, since this method does not perform error checking on
 // the derived network address type. Furthermore, other types of network
-// addresses (like TORv3 or I2P) will not be recognized.
+// addresses (like TorV3 or I2P) will not be recognized.
 func NewNetAddressFromIPPort(ip net.IP, port uint16, services wire.ServiceFlag) *NetAddress {
 	netAddressType, _ := deriveNetAddressType(UnknownAddressType, ip)
 	timestamp := time.Unix(time.Now().Unix(), 0)

@@ -1,0 +1,2128 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>v2: Go Coverage Report</title>
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">github.com/decred/dcrd/addrmgr/v2/addrmanager.go (90.1%)</option>
+				
+				<option value="file1">github.com/decred/dcrd/addrmgr/v2/error.go (100.0%)</option>
+				
+				<option value="file2">github.com/decred/dcrd/addrmgr/v2/knownaddress.go (100.0%)</option>
+				
+				<option value="file3">github.com/decred/dcrd/addrmgr/v2/log.go (100.0%)</option>
+				
+				<option value="file4">github.com/decred/dcrd/addrmgr/v2/netaddress.go (100.0%)</option>
+				
+				<option value="file5">github.com/decred/dcrd/addrmgr/v2/network.go (100.0%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">not covered</span>
+				<span class="cov8">covered</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">// Copyright (c) 2013-2014 The btcsuite developers
+// Copyright (c) 2015-2024 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
+package addrmgr
+
+import (
+        "encoding/base32"
+        "encoding/binary"
+        "encoding/json"
+        "fmt"
+        "net"
+        "os"
+        "path/filepath"
+        "strings"
+        "sync"
+        "sync/atomic"
+        "time"
+
+        "github.com/decred/dcrd/chaincfg/chainhash"
+        "github.com/decred/dcrd/crypto/rand"
+        "github.com/decred/dcrd/wire"
+)
+
+// peersFilename is the default filename to store serialized peers.
+const peersFilename = "peers.json"
+
+// AddrManager provides a concurrency safe address manager for caching potential
+// peers on the Decred network.
+type AddrManager struct {
+        // mtx is used to ensure safe concurrent access to fields on an instance
+        // of the address manager.
+        mtx sync.Mutex
+
+        // peersFile is the path of file that the address manager's serialized state
+        // is saved to and loaded from.
+        peersFile string
+
+        // key is a random seed used to map addresses to new and tried buckets.
+        key [32]byte
+
+        // addrIndex maintains an index of all addresses known to the address
+        // manager, including both new and tried addresses.  The key is a
+        // unique string representation of the underlying network address.
+        addrIndex map[string]*KnownAddress
+
+        // addrNew stores addresses considered newly added to the address manager
+        // and have not been tried.  It also serves as storage for addresses that
+        // were considered tried but were randomly evicted to avoid exceeding the
+        // tried address capacity.
+        addrNew [newBucketCount]map[string]*KnownAddress
+
+        // addrTried is a collection of tried buckets that store tried addresses.
+        // Tried addresses are addresses that have been tested.
+        addrTried [triedBucketCount][]*KnownAddress
+
+        // addrChanged signals whether the address manager needs to have its state
+        // serialized and saved to the file system.
+        addrChanged bool
+
+        // started signals whether the address manager has been started.  Its value
+        // is 1 or more if started.
+        started int32
+
+        // shutdown signals whether a shutdown of the address manager has been
+        // initiated.  Its value is 1 or more if a shutdown is done or in progress.
+        shutdown int32
+
+        // The following fields are used for lifecycle management of the
+        // address manager.
+        wg   sync.WaitGroup
+        quit chan struct{}
+
+        // nTried represents the total number of tried addresses across all tried
+        // buckets.
+        nTried int
+
+        // nNew represents the total number of new addresses across all new buckets.
+        nNew int
+
+        // lamtx is used to protect access to the local address map.
+        lamtx sync.Mutex
+
+        // localAddresses stores all known local addresses, keyed by the respective
+        // unique string representation of the network address.
+        localAddresses map[string]*localAddress
+
+        // getTriedBucket returns an index in the tried bucket for the network
+        // address.
+        getTriedBucket func(netAddr *NetAddress) int
+
+        // getNewBucket returns an index in the new address bucket for the network
+        // address.
+        getNewBucket func(netAddr, srcAddr *NetAddress) int
+
+        // triedBucketSize is the maximum number of addresses in each tried bucket.
+        triedBucketSize int
+}
+
+// serializedKnownAddress is used to represent the serializable state of a
+// known address.  It excludes convenience fields that can be derived from the
+// address manager's state.
+type serializedKnownAddress struct {
+        Addr        string
+        Src         string
+        Attempts    int
+        TimeStamp   int64
+        LastAttempt int64
+        LastSuccess int64
+}
+
+// serializedAddrManager is used to represent the serializable state of an
+// address manager instance.
+type serializedAddrManager struct {
+        Version      int
+        Key          [32]byte
+        Addresses    []*serializedKnownAddress
+        NewBuckets   [newBucketCount][]string
+        TriedBuckets [triedBucketCount][]string
+}
+
+type localAddress struct {
+        na    *NetAddress
+        score AddressPriority
+}
+
+// LocalAddr represents network address information for a local address.
+type LocalAddr struct {
+        Address string
+        Port    uint16
+        Score   int32
+}
+
+// AddressPriority type is used to describe the hierarchy of local address
+// discovery methods.
+type AddressPriority int
+
+const (
+        // InterfacePrio signifies the address is on a local interface.
+        InterfacePrio AddressPriority = iota
+
+        // BoundPrio signifies the address has been explicitly bounded to.
+        BoundPrio
+
+        // UpnpPrio signifies the address was obtained from UPnP.
+        UpnpPrio
+
+        // HTTPPrio signifies the address was obtained from an external HTTP service.
+        HTTPPrio
+
+        // ManualPrio signifies the address was provided by --externalip.
+        ManualPrio
+)
+
+const (
+        // needAddressThreshold is the number of addresses under which the
+        // address manager will claim to need more addresses.
+        needAddressThreshold = 1000
+
+        // dumpAddressInterval is the interval used to dump the address
+        // cache to disk for future use.
+        dumpAddressInterval = time.Minute * 10
+
+        // defaultTriedBucketSize is the default value for the maximum number of
+        // addresses in each tried address bucket.
+        defaultTriedBucketSize = 256
+
+        // triedBucketCount is the number of buckets we split tried
+        // addresses over.
+        triedBucketCount = 64
+
+        // newBucketSize is the maximum number of addresses in each new address
+        // bucket.
+        newBucketSize = 64
+
+        // newBucketCount is the number of buckets that we spread new addresses
+        // over.
+        newBucketCount = 1024
+
+        // triedBucketsPerGroup is the number of tried buckets over which an
+        // address group will be spread.
+        triedBucketsPerGroup = 8
+
+        // newBucketsPerGroup is the number of new buckets over which an
+        // source address group will be spread.
+        newBucketsPerGroup = 64
+
+        // newBucketsPerAddress is the number of buckets a frequently seen new
+        // address may end up in.
+        newBucketsPerAddress = 8
+
+        // numMissingDays is the number of days before which we assume an
+        // address has vanished if we have not seen it announced in that long.
+        numMissingDays = 30
+
+        // numRetries is the number of tried without a single success before
+        // we assume an address is bad.
+        numRetries = 3
+
+        // maxFailures is the maximum number of failures we will accept without
+        // a success before considering an address bad.
+        maxFailures = 5
+
+        // minBadDays is the number of days since the last success before we
+        // will consider evicting an address.
+        minBadDays = 7
+
+        // getKnownAddressLimit is the maximum number of known addresses returned
+        // from the address manager when a collection of known addresses is
+        // requested.
+        getKnownAddressLimit = 2500
+
+        // getKnownAddressPercentage is the percentage of total number of known
+        // addresses returned from the address manager when a collection of known
+        // addresses is requested.
+        getKnownAddressPercentage = 23
+
+        // serialisationVersion is the current version of the on-disk format.
+        serialisationVersion = 1
+)
+
+// addOrUpdateAddress is a helper function to either update an address already known
+// to the address manager, or to add the address if not already known.
+func (a *AddrManager) addOrUpdateAddress(netAddr, srcAddr *NetAddress) <span class="cov8" title="1">{
+        // Filter out non-routable addresses. Note that non-routable
+        // also includes invalid and local addresses.
+        if !netAddr.IsRoutable() </span><span class="cov0" title="0">{
+                return
+        }</span>
+
+        <span class="cov8" title="1">addrKey := netAddr.Key()
+        ka := a.find(netAddr)
+        if ka != nil </span><span class="cov8" title="1">{
+                // TODO(oga) only update addresses periodically.
+                // Update the last seen time and services.
+                // note that to prevent causing excess garbage on getaddr
+                // messages the netaddresses in addrmanager are *immutable*,
+                // if we need to change them then we replace the pointer with a
+                // new copy so that we don't have to copy every na for getaddr.
+                if netAddr.Timestamp.After(ka.na.Timestamp) ||
+                        (ka.na.Services&amp;netAddr.Services) !=
+                                netAddr.Services </span><span class="cov8" title="1">{
+
+                        naCopy := ka.na.Clone()
+                        naCopy.Timestamp = netAddr.Timestamp
+                        naCopy.AddService(netAddr.Services)
+                        ka.mtx.Lock()
+                        ka.na = naCopy
+                        ka.mtx.Unlock()
+                }</span>
+
+                // If already in tried, we have nothing to do here.
+                <span class="cov8" title="1">if ka.tried </span><span class="cov0" title="0">{
+                        return
+                }</span>
+
+                // Already at our max?
+                <span class="cov8" title="1">if ka.refs == newBucketsPerAddress </span><span class="cov0" title="0">{
+                        return
+                }</span>
+
+                // The more entries we have, the less likely we are to add more.
+                // likelihood is 2N.
+                <span class="cov8" title="1">factor := int32(2 * ka.refs)
+                if rand.Int32N(factor) != 0 </span><span class="cov8" title="1">{
+                        return
+                }</span>
+        } else<span class="cov8" title="1"> {
+                // Make a copy of the net address to avoid races since it is
+                // updated elsewhere in the addrmanager code and would otherwise
+                // change the actual netaddress on the peer.
+                netAddrCopy := netAddr.Clone()
+                ka = &amp;KnownAddress{na: netAddrCopy, srcAddr: srcAddr}
+                a.addrIndex[addrKey] = ka
+                a.nNew++
+                a.addrChanged = true
+        }</span>
+
+        <span class="cov8" title="1">bucket := a.getNewBucket(netAddr, srcAddr)
+
+        // If the address already exists in the new bucket, do not replace it.
+        if _, ok := a.addrNew[bucket][addrKey]; ok </span><span class="cov0" title="0">{
+                return
+        }</span>
+
+        // Enforce max addresses.
+        <span class="cov8" title="1">if len(a.addrNew[bucket]) &gt; newBucketSize </span><span class="cov8" title="1">{
+                log.Tracef("new bucket is full, expiring old")
+                a.expireNew(bucket)
+        }</span>
+
+        // Add to new bucket.
+        <span class="cov8" title="1">ka.refs++
+        a.addrNew[bucket][addrKey] = ka
+        a.addrChanged = true
+
+        log.Tracef("Added new address %s for a total of %d addresses", addrKey,
+                a.nTried+a.nNew)</span>
+}
+
+// expireNew makes space in the new buckets by expiring the really bad entries.
+// If no bad entries are available we look at a few and remove the oldest.
+func (a *AddrManager) expireNew(bucket int) <span class="cov8" title="1">{
+        // First see if there are any entries that are so bad we can just throw
+        // them away. otherwise we throw away the oldest entry in the cache.
+        // Bitcoind here chooses four random and just throws the oldest of
+        // those away, but we keep track of oldest in the initial traversal and
+        // use that information instead.
+        var oldest *KnownAddress
+        for k, v := range a.addrNew[bucket] </span><span class="cov8" title="1">{
+                if v.isBad() </span><span class="cov0" title="0">{
+                        log.Tracef("expiring bad address %v", k)
+                        delete(a.addrNew[bucket], k)
+                        a.addrChanged = true
+                        v.refs--
+                        if v.refs == 0 </span><span class="cov0" title="0">{
+                                a.nNew--
+                                delete(a.addrIndex, k)
+                        }</span>
+                        <span class="cov0" title="0">continue</span>
+                }
+                <span class="cov8" title="1">if oldest == nil </span><span class="cov8" title="1">{
+                        oldest = v
+                }</span> else<span class="cov8" title="1"> if !v.na.Timestamp.After(oldest.na.Timestamp) </span><span class="cov8" title="1">{
+                        oldest = v
+                }</span>
+        }
+
+        <span class="cov8" title="1">if oldest != nil </span><span class="cov8" title="1">{
+                key := oldest.na.Key()
+                log.Tracef("expiring oldest address %v", key)
+
+                delete(a.addrNew[bucket], key)
+                a.addrChanged = true
+                oldest.refs--
+                if oldest.refs == 0 </span><span class="cov8" title="1">{
+                        a.nNew--
+                        delete(a.addrIndex, key)
+                }</span>
+        }
+}
+
+// getOldestAddressIndex returns the index of the oldest address in the tried
+// bucket.  It is used when there is a need to evict an element from a tried
+// bucket to make room for a newly tried address.
+func (a *AddrManager) getOldestAddressIndex(bucket int) int <span class="cov8" title="1">{
+        var oldest *KnownAddress
+        var idx int
+
+        for i, ka := range a.addrTried[bucket] </span><span class="cov8" title="1">{
+                if i == 0 || oldest.na.Timestamp.After(ka.na.Timestamp) </span><span class="cov8" title="1">{
+                        oldest = ka
+                        idx = i
+                }</span>
+        }
+        <span class="cov8" title="1">return idx</span>
+}
+
+// getNewBucket returns a psuedorandom new bucket index for the provided
+// addresses.
+func getNewBucket(key [32]byte, netAddr, srcAddr *NetAddress) int <span class="cov8" title="1">{
+        data1 := []byte{}
+        data1 = append(data1, key[:]...)
+        data1 = append(data1, []byte(netAddr.GroupKey())...)
+        data1 = append(data1, []byte(srcAddr.GroupKey())...)
+        hash1 := chainhash.HashB(data1)
+        hash64 := binary.LittleEndian.Uint64(hash1)
+        hash64 %= newBucketsPerGroup
+        var hashbuf [8]byte
+        binary.LittleEndian.PutUint64(hashbuf[:], hash64)
+        data2 := []byte{}
+        data2 = append(data2, key[:]...)
+        data2 = append(data2, srcAddr.GroupKey()...)
+        data2 = append(data2, hashbuf[:]...)
+
+        hash2 := chainhash.HashB(data2)
+        return int(binary.LittleEndian.Uint64(hash2) % newBucketCount)
+}</span>
+
+// getTriedBucket returns a psuedorandom tried bucket index for the provided
+// address.
+func getTriedBucket(key [32]byte, netAddr *NetAddress) int <span class="cov8" title="1">{
+        data1 := []byte{}
+        data1 = append(data1, key[:]...)
+        data1 = append(data1, []byte(netAddr.Key())...)
+        hash1 := chainhash.HashB(data1)
+        hash64 := binary.LittleEndian.Uint64(hash1)
+        hash64 %= triedBucketsPerGroup
+        var hashbuf [8]byte
+        binary.LittleEndian.PutUint64(hashbuf[:], hash64)
+        data2 := []byte{}
+        data2 = append(data2, key[:]...)
+        data2 = append(data2, netAddr.GroupKey()...)
+        data2 = append(data2, hashbuf[:]...)
+
+        hash2 := chainhash.HashB(data2)
+        return int(binary.LittleEndian.Uint64(hash2) % triedBucketCount)
+}</span>
+
+// addressHandler is the main handler for the address manager.  It must be run
+// as a goroutine.
+func (a *AddrManager) addressHandler() <span class="cov8" title="1">{
+        dumpAddressTicker := time.NewTicker(dumpAddressInterval)
+        defer dumpAddressTicker.Stop()
+out:
+        for </span><span class="cov8" title="1">{
+                select </span>{
+                case &lt;-dumpAddressTicker.C:<span class="cov0" title="0">
+                        a.savePeers()</span>
+
+                case &lt;-a.quit:<span class="cov8" title="1">
+                        break out</span>
+                }
+        }
+        <span class="cov8" title="1">a.savePeers()
+        a.wg.Done()
+        log.Trace("Address handler done")</span>
+}
+
+// savePeers saves all the known addresses to a file so they can be read back
+// in at next run.
+func (a *AddrManager) savePeers() <span class="cov8" title="1">{
+        a.mtx.Lock()
+        defer a.mtx.Unlock()
+
+        if !a.addrChanged </span><span class="cov0" title="0">{
+                // Nothing changed since last savePeers call.
+                return
+        }</span>
+
+        // First we make a serialisable data structure so we can encode it to JSON.
+        <span class="cov8" title="1">sam := new(serializedAddrManager)
+        sam.Version = serialisationVersion
+        copy(sam.Key[:], a.key[:])
+
+        sam.Addresses = make([]*serializedKnownAddress, len(a.addrIndex))
+        i := 0
+        for k, v := range a.addrIndex </span><span class="cov8" title="1">{
+                ska := new(serializedKnownAddress)
+                ska.Addr = k
+                ska.TimeStamp = v.na.Timestamp.Unix()
+                ska.Src = v.srcAddr.Key()
+                ska.Attempts = v.attempts
+                ska.LastAttempt = v.lastattempt.Unix()
+                ska.LastSuccess = v.lastsuccess.Unix()
+                // Tried and refs are implicit in the rest of the structure
+                // and will be worked out from context on unserialisation.
+                sam.Addresses[i] = ska
+                i++
+        }</span>
+        <span class="cov8" title="1">for i := range a.addrNew </span><span class="cov8" title="1">{
+                sam.NewBuckets[i] = make([]string, len(a.addrNew[i]))
+                j := 0
+                for k := range a.addrNew[i] </span><span class="cov8" title="1">{
+                        sam.NewBuckets[i][j] = k
+                        j++
+                }</span>
+        }
+        <span class="cov8" title="1">for i := range a.addrTried </span><span class="cov8" title="1">{
+                sam.TriedBuckets[i] = make([]string, len(a.addrTried[i]))
+                j := 0
+                for _, ka := range a.addrTried[i] </span><span class="cov0" title="0">{
+                        sam.TriedBuckets[i][j] = ka.na.Key()
+                        j++
+                }</span>
+        }
+
+        // Write temporary peers file and then move it into place.
+        <span class="cov8" title="1">tmpfile := a.peersFile + ".new"
+        w, err := os.Create(tmpfile)
+        if err != nil </span><span class="cov8" title="1">{
+                log.Errorf("Error opening file %s: %v", tmpfile, err)
+                return
+        }</span>
+        <span class="cov8" title="1">enc := json.NewEncoder(w)
+        if err := enc.Encode(&amp;sam); err != nil </span><span class="cov0" title="0">{
+                log.Errorf("Failed to encode file %s: %v", tmpfile, err)
+                return
+        }</span>
+        <span class="cov8" title="1">if err := w.Close(); err != nil </span><span class="cov0" title="0">{
+                log.Errorf("Error closing file %s: %v", tmpfile, err)
+                return
+        }</span>
+        <span class="cov8" title="1">if err := os.Rename(tmpfile, a.peersFile); err != nil </span><span class="cov0" title="0">{
+                log.Errorf("Error writing file %s: %v", a.peersFile, err)
+                return
+        }</span>
+        <span class="cov8" title="1">a.addrChanged = false</span>
+}
+
+// loadPeers loads the known addresses from a saved file.  If the file is empty,
+// missing, or malformed then no known addresses will be added to the address
+// manager from a call to this method.
+func (a *AddrManager) loadPeers() <span class="cov8" title="1">{
+        a.mtx.Lock()
+        defer a.mtx.Unlock()
+
+        err := a.deserializePeers(a.peersFile)
+        if err != nil </span><span class="cov8" title="1">{
+                log.Errorf("Failed to parse file %s: %v", a.peersFile, err)
+                // if it is invalid we nuke the old one unconditionally.
+                err = os.Remove(a.peersFile)
+                if err != nil </span><span class="cov0" title="0">{
+                        log.Warnf("Failed to remove corrupt peers file %s: %v",
+                                a.peersFile, err)
+                }</span>
+                <span class="cov8" title="1">a.reset()
+                return</span>
+        }
+        <span class="cov8" title="1">log.Infof("Loaded %d addresses from file '%s'", a.numAddresses(), a.peersFile)</span>
+}
+
+func (a *AddrManager) deserializePeers(filePath string) error <span class="cov8" title="1">{
+        _, err := os.Stat(filePath)
+        if os.IsNotExist(err) </span><span class="cov8" title="1">{
+                return nil
+        }</span>
+        <span class="cov8" title="1">r, err := os.Open(filePath)
+        if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("%s error opening file: %w", filePath, err)
+        }</span>
+        <span class="cov8" title="1">defer r.Close()
+
+        var sam serializedAddrManager
+        dec := json.NewDecoder(r)
+        err = dec.Decode(&amp;sam)
+        if err != nil </span><span class="cov8" title="1">{
+                return fmt.Errorf("error reading %s: %w", filePath, err)
+        }</span>
+
+        <span class="cov8" title="1">if sam.Version != serialisationVersion </span><span class="cov0" title="0">{
+                return fmt.Errorf("unknown version %v in serialized "+
+                        "addrmanager", sam.Version)
+        }</span>
+        <span class="cov8" title="1">copy(a.key[:], sam.Key[:])
+
+        for _, v := range sam.Addresses </span><span class="cov8" title="1">{
+                netAddr, err := a.newNetAddressFromString(v.Addr)
+                if err != nil </span><span class="cov0" title="0">{
+                        return fmt.Errorf("failed to deserialize netaddress %s: %w", v.Addr,
+                                err)
+                }</span>
+                <span class="cov8" title="1">srcAddr, err := a.newNetAddressFromString(v.Src)
+                if err != nil </span><span class="cov0" title="0">{
+                        return fmt.Errorf("failed to deserialize netaddress %s: %w", v.Src,
+                                err)
+                }</span>
+
+                <span class="cov8" title="1">ka := &amp;KnownAddress{
+                        na:          netAddr,
+                        srcAddr:     srcAddr,
+                        attempts:    v.Attempts,
+                        lastattempt: time.Unix(v.LastAttempt, 0),
+                        lastsuccess: time.Unix(v.LastSuccess, 0),
+                }
+                a.addrIndex[ka.na.Key()] = ka</span>
+        }
+
+        <span class="cov8" title="1">for i := range sam.NewBuckets </span><span class="cov8" title="1">{
+                for _, val := range sam.NewBuckets[i] </span><span class="cov8" title="1">{
+                        ka, ok := a.addrIndex[val]
+                        if !ok </span><span class="cov0" title="0">{
+                                return fmt.Errorf("new buckets contains %s but "+
+                                        "none in address list", val)
+                        }</span>
+
+                        <span class="cov8" title="1">if ka.refs == 0 </span><span class="cov8" title="1">{
+                                a.nNew++
+                        }</span>
+                        <span class="cov8" title="1">ka.refs++
+                        a.addrNew[i][val] = ka</span>
+                }
+        }
+        <span class="cov8" title="1">for i := range sam.TriedBuckets </span><span class="cov8" title="1">{
+                for _, val := range sam.TriedBuckets[i] </span><span class="cov0" title="0">{
+                        ka, ok := a.addrIndex[val]
+                        if !ok </span><span class="cov0" title="0">{
+                                return fmt.Errorf("tried buckets contains %s but "+
+                                        "none in address list", val)
+                        }</span>
+
+                        <span class="cov0" title="0">ka.tried = true
+                        a.nTried++
+                        a.addrTried[i] = append(a.addrTried[i], ka)</span>
+                }
+        }
+
+        // Sanity checking.
+        <span class="cov8" title="1">for k, v := range a.addrIndex </span><span class="cov8" title="1">{
+                if v.refs == 0 &amp;&amp; !v.tried </span><span class="cov0" title="0">{
+                        return fmt.Errorf("address %s after serialisation "+
+                                "with no references", k)
+                }</span>
+
+                <span class="cov8" title="1">if v.refs &gt; 0 &amp;&amp; v.tried </span><span class="cov0" title="0">{
+                        return fmt.Errorf("address %s after serialisation "+
+                                "which is both new and tried", k)
+                }</span>
+        }
+
+        <span class="cov8" title="1">return nil</span>
+}
+
+// Start begins the core address handler which manages a pool of known
+// addresses, timeouts, and interval based writes.  If the address manager is
+// starting or has already been started, invoking this method has no
+// effect.
+//
+// This function is safe for concurrent access.
+func (a *AddrManager) Start() <span class="cov8" title="1">{
+        // Return early if the address manager has already been started.
+        if atomic.AddInt32(&amp;a.started, 1) != 1 </span><span class="cov0" title="0">{
+                return
+        }</span>
+
+        <span class="cov8" title="1">log.Trace("Starting address manager")
+
+        // Load peers we already know about from file.
+        a.loadPeers()
+
+        // Start the address ticker to save addresses periodically.
+        a.wg.Add(1)
+        go a.addressHandler()</span>
+}
+
+// Stop gracefully shuts down the address manager by stopping the main handler.
+//
+// This function is safe for concurrent access.
+func (a *AddrManager) Stop() error <span class="cov8" title="1">{
+        // Return early if the address manager has already been stopped.
+        if atomic.AddInt32(&amp;a.shutdown, 1) != 1 </span><span class="cov0" title="0">{
+                log.Warnf("Address manager is already in the process of shutting down")
+                return nil
+        }</span>
+
+        <span class="cov8" title="1">log.Infof("Address manager shutting down")
+        close(a.quit)
+        a.wg.Wait()
+        return nil</span>
+}
+
+// AddAddresses adds new addresses to the address manager.  It enforces a max
+// number of addresses and silently ignores duplicate addresses.
+//
+// This function is safe for concurrent access.
+func (a *AddrManager) AddAddresses(addrs []*NetAddress, srcAddr *NetAddress) <span class="cov8" title="1">{
+        a.mtx.Lock()
+        defer a.mtx.Unlock()
+
+        for _, na := range addrs </span><span class="cov8" title="1">{
+                a.addOrUpdateAddress(na, srcAddr)
+        }</span>
+}
+
+// numAddresses returns the number of addresses known to the address manager.
+//
+// This function MUST be called with the address manager lock held (for reads).
+func (a *AddrManager) numAddresses() int <span class="cov8" title="1">{
+        return a.nTried + a.nNew
+}</span>
+
+// NeedMoreAddresses returns whether or not the address manager needs more
+// addresses.
+//
+// This function is safe for concurrent access.
+func (a *AddrManager) NeedMoreAddresses() bool <span class="cov8" title="1">{
+        a.mtx.Lock()
+        defer a.mtx.Unlock()
+
+        return a.numAddresses() &lt; needAddressThreshold
+}</span>
+
+// AddressCache returns a randomized subset of all known addresses.
+//
+// This function is safe for concurrent access.
+func (a *AddrManager) AddressCache() []*NetAddress <span class="cov8" title="1">{
+        a.mtx.Lock()
+        defer a.mtx.Unlock()
+
+        // Determine length of all addresses in index.
+        addrLen := len(a.addrIndex)
+        if addrLen == 0 </span><span class="cov0" title="0">{
+                return nil
+        }</span>
+
+        <span class="cov8" title="1">allAddr := make([]*NetAddress, 0, addrLen)
+        // Iteration order is undefined here, but we randomize it anyway.
+        for _, v := range a.addrIndex </span><span class="cov8" title="1">{
+                // Skip low quality addresses.
+                if v.isBad() </span><span class="cov0" title="0">{
+                        continue</span>
+                }
+                // Skip addresses that never succeeded.
+                <span class="cov8" title="1">if v.lastsuccess.IsZero() </span><span class="cov0" title="0">{
+                        continue</span>
+                }
+                <span class="cov8" title="1">allAddr = append(allAddr, v.na)</span>
+        }
+
+        // Adjust length, we only deal with high quality addresses now.
+        <span class="cov8" title="1">addrLen = len(allAddr)
+
+        numAddresses := addrLen * getKnownAddressPercentage / 100
+        if numAddresses &gt; getKnownAddressLimit </span><span class="cov0" title="0">{
+                numAddresses = getKnownAddressLimit
+        }</span>
+
+        // Fisher-Yates shuffle the array.
+        <span class="cov8" title="1">rand.ShuffleSlice(allAddr)
+
+        // Slice off the limit we are willing to share.
+        return allAddr[0:numAddresses]</span>
+}
+
+// reset resets the address manager by reinitialising the random source
+// and allocating fresh empty bucket storage.
+func (a *AddrManager) reset() <span class="cov8" title="1">{
+        a.addrIndex = make(map[string]*KnownAddress)
+
+        // fill key with bytes from a good random source.
+        rand.Read(a.key[:])
+        for i := range a.addrNew </span><span class="cov8" title="1">{
+                a.addrNew[i] = make(map[string]*KnownAddress)
+        }</span>
+        <span class="cov8" title="1">for i := range a.addrTried </span><span class="cov8" title="1">{
+                a.addrTried[i] = nil
+        }</span>
+        <span class="cov8" title="1">a.addrChanged = true
+        a.getNewBucket = func(netAddr, srcAddr *NetAddress) int </span><span class="cov8" title="1">{
+                return getNewBucket(a.key, netAddr, srcAddr)
+        }</span>
+        <span class="cov8" title="1">a.getTriedBucket = func(netAddr *NetAddress) int </span><span class="cov8" title="1">{
+                return getTriedBucket(a.key, netAddr)
+        }</span>
+}
+
+// ParseHost deconstructs a given host address to its []byte representation
+// and also returns the network address type. If an error occurs while decoding
+// an onion address, the error is returned. If the host cannot be decoded, then
+// an unknown address type is returned without error.
+func ParseHost(host string) (NetAddressType, []byte, error) <span class="cov8" title="1">{
+        // Look for TorV3 addresses first and return early if successful.
+        // TorV3 addresses (hidden service names) are 56 char base32 + ".onion".
+        // Note that, as per the TorV3 spec, ".onion" is expected to be lowercase.
+        if strings.HasSuffix(host, ".onion") </span><span class="cov8" title="1">{
+                if len(host) == 62 </span><span class="cov8" title="1">{
+                        // go base32 encoding uses uppercase (as does the rfc), but Tor and
+                        // bitcoind tend to user lowercase, so we convert to uppercase here.
+                        torAddressBytes, err := base32.StdEncoding.DecodeString(
+                                strings.ToUpper(host[:56]))
+                        if err != nil </span><span class="cov8" title="1">{
+                                return UnknownAddressType, nil, err
+                        }</span>
+                        <span class="cov8" title="1">if pubkey, valid := isTorV3(torAddressBytes); valid </span><span class="cov8" title="1">{
+                                // The net address bytes returned is the 32 byte pubkey,
+                                // not the entire 35 byte onion address.
+                                return TorV3Address, pubkey, nil
+                        }</span>
+                }
+        }
+
+        // Look for IPv4 or IPv6 addresses next
+        <span class="cov8" title="1">if ip := net.ParseIP(host); ip != nil </span><span class="cov8" title="1">{
+                if isIPv4(ip) </span><span class="cov8" title="1">{
+                        return IPv4Address, ip.To4(), nil
+                }</span>
+                <span class="cov8" title="1">return IPv6Address, ip, nil</span>
+        }
+
+        // The given host address could not be recognized
+        <span class="cov8" title="1">return UnknownAddressType, nil, nil</span>
+}
+
+// GetAddress returns a single address that should be routable. It picks a
+// random one from the possible addresses with preference given to ones that
+// have not been used recently and should not pick 'close' addresses
+// consecutively.
+//
+// This function is safe for concurrent access.
+func (a *AddrManager) GetAddress() *KnownAddress <span class="cov8" title="1">{
+        a.mtx.Lock()
+        defer a.mtx.Unlock()
+
+        if a.numAddresses() == 0 </span><span class="cov8" title="1">{
+                return nil
+        }</span>
+
+        // Use a 50% chance for choosing between tried and new table entries.
+        <span class="cov8" title="1">large := 1 &lt;&lt; 30
+        factor := 1.0
+        if a.nTried &gt; 0 &amp;&amp; (a.nNew == 0 || rand.IntN(2) == 0) </span><span class="cov8" title="1">{
+                // Tried entry.
+                for </span><span class="cov8" title="1">{
+                        // Pick a random bucket.
+                        bucket := rand.IntN(len(a.addrTried))
+                        if len(a.addrTried[bucket]) == 0 </span><span class="cov8" title="1">{
+                                continue</span>
+                        }
+
+                        // Then, a random entry in the list.
+                        <span class="cov8" title="1">randEntry := rand.IntN(len(a.addrTried[bucket]))
+                        ka := a.addrTried[bucket][randEntry]
+
+                        randval := rand.IntN(large)
+                        if float64(randval) &lt; (factor * ka.chance() * float64(large)) </span><span class="cov8" title="1">{
+                                log.Tracef("Selected %v from tried bucket", ka.na.Key())
+                                return ka
+                        }</span>
+                        <span class="cov8" title="1">factor *= 1.2</span>
+                }
+        } else<span class="cov8" title="1"> {
+                // New node.
+                for </span><span class="cov8" title="1">{
+                        // Pick a random bucket.
+                        bucket := rand.IntN(len(a.addrNew))
+                        if len(a.addrNew[bucket]) == 0 </span><span class="cov8" title="1">{
+                                continue</span>
+                        }
+
+                        // Then, a random entry in it.
+                        <span class="cov8" title="1">var ka *KnownAddress
+                        nth := rand.IntN(len(a.addrNew[bucket]))
+                        for _, value := range a.addrNew[bucket] </span><span class="cov8" title="1">{
+                                if nth == 0 </span><span class="cov8" title="1">{
+                                        ka = value
+                                        break</span>
+                                }
+                                <span class="cov0" title="0">nth--</span>
+                        }
+                        <span class="cov8" title="1">randval := rand.IntN(large)
+                        if float64(randval) &lt; (factor * ka.chance() * float64(large)) </span><span class="cov8" title="1">{
+                                log.Tracef("Selected %s from new bucket", ka.na)
+                                return ka
+                        }</span>
+                        <span class="cov8" title="1">factor *= 1.2</span>
+                }
+        }
+}
+
+func (a *AddrManager) find(addr *NetAddress) *KnownAddress <span class="cov8" title="1">{
+        return a.addrIndex[addr.Key()]
+}</span>
+
+// Attempt increases the provided known address' attempt counter and updates
+// the last attempt time. If the address is unknown then an error is returned.
+//
+// This function is safe for concurrent access.
+func (a *AddrManager) Attempt(addr *NetAddress) error <span class="cov8" title="1">{
+        a.mtx.Lock()
+        defer a.mtx.Unlock()
+
+        // find address.
+        // Surely address will be in tried by now?
+        ka := a.find(addr)
+        if ka == nil </span><span class="cov8" title="1">{
+                str := fmt.Sprintf("address %s not found", addr)
+                return makeError(ErrAddressNotFound, str)
+        }</span>
+
+        // set last tried time to now
+        <span class="cov8" title="1">ka.mtx.Lock()
+        ka.attempts++
+        ka.lastattempt = time.Now()
+        ka.mtx.Unlock()
+        return nil</span>
+}
+
+// Connected marks the provided known address as connected and working at the
+// current time.  If the address is unknown then an error is returned.
+//
+// This function is safe for concurrent access.
+func (a *AddrManager) Connected(addr *NetAddress) error <span class="cov8" title="1">{
+        a.mtx.Lock()
+        defer a.mtx.Unlock()
+
+        ka := a.find(addr)
+        if ka == nil </span><span class="cov8" title="1">{
+                str := fmt.Sprintf("address %s not found", addr)
+                return makeError(ErrAddressNotFound, str)
+        }</span>
+
+        // Update the time as long as it has been 20 minutes since last we did
+        // so.
+        <span class="cov8" title="1">now := time.Now()
+        if now.After(ka.na.Timestamp.Add(time.Minute * 20)) </span><span class="cov8" title="1">{
+                // ka.na is immutable, so replace it.
+                ka.mtx.Lock()
+                naCopy := ka.na.Clone()
+                naCopy.Timestamp = time.Now()
+                ka.na = naCopy
+                ka.mtx.Unlock()
+        }</span>
+        <span class="cov8" title="1">return nil</span>
+}
+
+// Good marks the provided known address as good.  This should be called after a
+// successful outbound connection and version exchange with a peer.  If the
+// address is unknown then an error is returned.
+//
+// This function is safe for concurrent access.
+func (a *AddrManager) Good(addr *NetAddress) error <span class="cov8" title="1">{
+        a.mtx.Lock()
+        defer a.mtx.Unlock()
+
+        ka := a.find(addr)
+        if ka == nil </span><span class="cov8" title="1">{
+                str := fmt.Sprintf("address %s not found", addr)
+                return makeError(ErrAddressNotFound, str)
+        }</span>
+
+        // ka.Timestamp is not updated here to avoid leaking information
+        // about currently connected peers.
+        <span class="cov8" title="1">now := time.Now()
+        ka.lastsuccess = now
+        ka.lastattempt = now
+        ka.attempts = 0
+
+        // If the address is already tried then return since it's already good.
+        // Otherwise, move it to a tried bucket. If the target tried bucket is full,
+        // then room will be made by evicting the oldest address in that bucket and
+        // moving it to a new bucket. If the psuedorandomly selected new bucket is
+        // full, then swap the addresses' positions between tried and new.
+        if ka.tried </span><span class="cov8" title="1">{
+                return nil
+        }</span>
+
+        // remove from all new buckets.
+        // record one of the buckets in question and call it the `first'
+        <span class="cov8" title="1">addrKey := ka.na.Key()
+        addrNewAvailableIndex := -1
+        for i := range a.addrNew </span><span class="cov8" title="1">{
+                // we check for existence so we can record the first one
+                if _, ok := a.addrNew[i][addrKey]; ok </span><span class="cov8" title="1">{
+                        delete(a.addrNew[i], addrKey)
+                        a.addrChanged = true
+                        ka.refs--
+                        if addrNewAvailableIndex == -1 </span><span class="cov8" title="1">{
+                                addrNewAvailableIndex = i
+                        }</span>
+                }
+        }
+        <span class="cov8" title="1">a.nNew--
+
+        if addrNewAvailableIndex == -1 </span><span class="cov8" title="1">{
+                str := fmt.Sprintf("%s is not marked as a new address", addr)
+                return makeError(ErrAddressNotFound, str)
+        }</span>
+
+        <span class="cov8" title="1">bucket := a.getTriedBucket(ka.na)
+
+        // If this tried bucket has enough capacity for another address,
+        // add the address to the bucket and flag it as tried.
+        if len(a.addrTried[bucket]) &lt; a.triedBucketSize </span><span class="cov8" title="1">{
+                ka.tried = true
+                a.addrTried[bucket] = append(a.addrTried[bucket], ka)
+                a.addrChanged = true
+                a.nTried++
+                return nil
+        }</span>
+
+        // Since the tried bucket is at capacity, evict the oldest address
+        // in the tried bucket and move it to a new bucket.
+        <span class="cov8" title="1">oldestTriedIndex := a.getOldestAddressIndex(bucket)
+        rmka := a.addrTried[bucket][oldestTriedIndex]
+
+        // First bucket it would have been put in.
+        newBucket := a.getNewBucket(rmka.na, rmka.srcAddr)
+
+        // If there is no room in the psuedorandomly selected new bucket,
+        // then reuse the new bucket that the newly tried address was removed from.
+        if len(a.addrNew[newBucket]) &gt;= newBucketSize </span><span class="cov0" title="0">{
+                newBucket = addrNewAvailableIndex
+        }</span>
+
+        // Replace oldest tried address in bucket with ka.
+        <span class="cov8" title="1">ka.tried = true
+        a.addrTried[bucket][oldestTriedIndex] = ka
+
+        rmka.tried = false
+        rmka.refs++
+
+        // The total number of tried addresses is not modified here since
+        // the number of tried addresses stays the same.  However, since the total
+        // number of new addresses was decremented above, increment it now
+        // since an address is being evicted from a tried bucket to a new bucket.
+        a.nNew++
+
+        rmkey := rmka.na.Key()
+        log.Tracef("Replacing %s with %s in tried", rmkey, addrKey)
+
+        // We made sure there is space here just above.
+        a.addrNew[newBucket][rmkey] = rmka
+        return nil</span>
+}
+
+// SetServices sets the services for the provided known address to the
+// provided value.  If the address is unknown then an error is returned.
+func (a *AddrManager) SetServices(addr *NetAddress, services wire.ServiceFlag) error <span class="cov8" title="1">{
+        a.mtx.Lock()
+        defer a.mtx.Unlock()
+
+        ka := a.find(addr)
+        if ka == nil </span><span class="cov8" title="1">{
+                str := fmt.Sprintf("address %s not found", addr)
+                return makeError(ErrAddressNotFound, str)
+        }</span>
+
+        // Update the services if needed.
+        <span class="cov8" title="1">if ka.na.Services != services </span><span class="cov8" title="1">{
+                // ka.na is immutable, so replace it.
+                ka.mtx.Lock()
+                naCopy := ka.na.Clone()
+                naCopy.Services = services
+                ka.na = naCopy
+                ka.mtx.Unlock()
+        }</span>
+        <span class="cov8" title="1">return nil</span>
+}
+
+// AddLocalAddress adds na to the list of known local addresses to advertise
+// with the given priority.
+//
+// This function is safe for concurrent access.
+func (a *AddrManager) AddLocalAddress(na *NetAddress, priority AddressPriority) error <span class="cov8" title="1">{
+        if !na.IsRoutable() </span><span class="cov8" title="1">{
+                return fmt.Errorf("address %s is not routable", na)
+        }</span>
+
+        <span class="cov8" title="1">a.lamtx.Lock()
+        defer a.lamtx.Unlock()
+
+        key := na.Key()
+        la, ok := a.localAddresses[key]
+        if !ok || la.score &lt; priority </span><span class="cov8" title="1">{
+                if ok </span><span class="cov8" title="1">{
+                        la.score = priority + 1
+                }</span> else<span class="cov8" title="1"> {
+                        a.localAddresses[key] = &amp;localAddress{
+                                na:    na,
+                                score: priority,
+                        }
+                }</span>
+        }
+        <span class="cov8" title="1">return nil</span>
+}
+
+// HasLocalAddress asserts if the manager has the provided local address.
+//
+// This function is safe for concurrent access.
+func (a *AddrManager) HasLocalAddress(na *NetAddress) bool <span class="cov8" title="1">{
+        a.lamtx.Lock()
+        _, ok := a.localAddresses[na.Key()]
+        a.lamtx.Unlock()
+        return ok
+}</span>
+
+// LocalAddresses returns a summary of local addresses information for
+// the getnetworkinfo rpc.
+//
+// This function is safe for concurrent access.
+func (a *AddrManager) LocalAddresses() []LocalAddr <span class="cov8" title="1">{
+        a.lamtx.Lock()
+        defer a.lamtx.Unlock()
+
+        addrs := make([]LocalAddr, 0, len(a.localAddresses))
+        for _, addr := range a.localAddresses </span><span class="cov8" title="1">{
+                la := LocalAddr{
+                        Address: addr.na.ipString(),
+                        Port:    addr.na.Port,
+                }
+
+                addrs = append(addrs, la)
+        }</span>
+
+        <span class="cov8" title="1">return addrs</span>
+}
+
+// NetAddressReach represents the connection state between two addresses.
+type NetAddressReach int
+
+const (
+        // Unreachable represents a publicly unreachable connection state
+        // between two addresses.
+        Unreachable NetAddressReach = 0
+
+        // Default represents the default connection state between two addresses.
+        Default NetAddressReach = iota
+
+        // Teredo represents a connection state between two RFC4380 addresses.
+        Teredo
+
+        // Ipv6Weak represents a weak IPV6 connection state between two addresses.
+        Ipv6Weak
+
+        // Ipv4 represents a connection state between two IPv4 addresses.
+        Ipv4
+
+        // Ipv6Strong represents a connection state between two IPv6 addresses.
+        Ipv6Strong
+
+        // PrivateTorV3 represents a connection state between two TorV3 addresses.
+        PrivateTorV3
+
+        // PrivateI2P represents a connection state between two I2P addresses.
+        PrivateI2P
+)
+
+// getRemoteReachabilityFromLocal returns the type of connection reachability
+// from a local address to a remote address.
+//
+// This function is safe for concurrent access.
+func getRemoteReachabilityFromLocal(localAddr, remoteAddr *NetAddress) NetAddressReach <span class="cov8" title="1">{
+        switch </span>{
+        case !remoteAddr.IsRoutable():<span class="cov8" title="1">
+                return Unreachable</span>
+
+        case remoteAddr.Type == TorV3Address:<span class="cov8" title="1">
+                switch </span>{
+                case localAddr.Type == TorV3Address:<span class="cov8" title="1">
+                        return PrivateTorV3</span>
+
+                // Tor relays can be reached by IPv4
+                case localAddr.Type == IPv4Address &amp;&amp; localAddr.IsRoutable():<span class="cov8" title="1">
+                        return Ipv4</span>
+
+                // As of Tor v0.4.5.1-alpha (2020), Tor relays can be reached by IPv6
+                case localAddr.Type == IPv6Address &amp;&amp; localAddr.IsRoutable():<span class="cov8" title="1">
+                        return Ipv6Weak</span>
+
+                default:<span class="cov8" title="1">
+                        return Default</span>
+                }
+
+        case isRFC4380(remoteAddr.IP):<span class="cov8" title="1">
+                switch </span>{
+                case !localAddr.IsRoutable():<span class="cov8" title="1">
+                        return Default</span>
+
+                case isRFC4380(localAddr.IP):<span class="cov8" title="1">
+                        return Teredo</span>
+
+                case localAddr.Type == IPv4Address:<span class="cov8" title="1">
+                        return Ipv4</span>
+
+                default:<span class="cov8" title="1">
+                        return Ipv6Weak</span>
+                }
+
+        case remoteAddr.Type == IPv4Address:<span class="cov8" title="1">
+                switch </span>{
+                case localAddr.IsRoutable() &amp;&amp; localAddr.Type == IPv4Address:<span class="cov8" title="1">
+                        return Ipv4</span>
+
+                default:<span class="cov8" title="1">
+                        return Unreachable</span>
+                }
+
+        case remoteAddr.Type == IPv6Address:<span class="cov8" title="1">
+                switch </span>{
+                case !localAddr.IsRoutable():<span class="cov8" title="1">
+                        return Default</span>
+
+                case isRFC4380(localAddr.IP):<span class="cov8" title="1">
+                        return Teredo</span>
+
+                case localAddr.Type == IPv4Address:<span class="cov8" title="1">
+                        return Ipv4</span>
+
+                // Is our IPv6 tunneled?
+                case isRFC3964(localAddr.IP) || isRFC6052(localAddr.IP) ||
+                        isRFC6145(localAddr.IP):<span class="cov8" title="1">
+                        // only prioritize ipv6 if we aren't tunnelling it.
+                        return Ipv6Weak</span>
+
+                default:<span class="cov8" title="1">
+                        return Ipv6Strong</span>
+                }
+
+        default:<span class="cov0" title="0">
+                return Default</span>
+        }
+}
+
+// GetBestLocalAddress returns the most appropriate local address to use
+// for the given remote address.
+//
+// This function is safe for concurrent access.
+func (a *AddrManager) GetBestLocalAddress(remoteAddr *NetAddress) *NetAddress <span class="cov8" title="1">{
+        a.lamtx.Lock()
+        defer a.lamtx.Unlock()
+
+        bestreach := Default
+        var bestscore AddressPriority
+        var bestAddress *NetAddress
+        for _, la := range a.localAddresses </span><span class="cov8" title="1">{
+                reach := getRemoteReachabilityFromLocal(la.na, remoteAddr)
+                if reach &gt; bestreach ||
+                        (reach == bestreach &amp;&amp; la.score &gt; bestscore) </span><span class="cov8" title="1">{
+                        bestreach = reach
+                        bestscore = la.score
+                        bestAddress = la.na
+                }</span>
+        }
+        <span class="cov8" title="1">if bestAddress != nil </span><span class="cov8" title="1">{
+                log.Debugf("Suggesting best local address %s for %s", bestAddress,
+                        remoteAddr)
+        }</span> else<span class="cov8" title="1"> {
+                log.Debugf("No worthy local address for %s", remoteAddr)
+
+                // Send something unroutable if nothing suitable.
+                var ip net.IP
+                if remoteAddr.Type != IPv4Address </span><span class="cov8" title="1">{
+                        ip = net.IPv6zero
+                }</span> else<span class="cov8" title="1"> {
+                        ip = net.IPv4zero
+                }</span>
+                <span class="cov8" title="1">bestAddress = NewNetAddressFromIPPort(ip, 0, wire.SFNodeNetwork)</span>
+        }
+
+        <span class="cov8" title="1">return bestAddress</span>
+}
+
+// IsExternalAddrCandidate returns a boolean indicating whether a suggested Net
+// address from a remote peer is a good candidate for this local node's public
+// external Net address. Additionally, IsExternalAddrCandidate provides the type
+// of reachability that the suggested localAddr has to the remoteAddr. This
+// function is crucial because nodes need to know their own public Net
+// addresses, but cannot determine this on their own. To avoid having to ask
+// a centralized server, nodes listen to what remote peers say they see them as.
+//
+// This function is safe for concurrent access.
+func (a *AddrManager) IsExternalAddrCandidate(localAddr, remoteAddr *NetAddress) (bool, NetAddressReach) <span class="cov8" title="1">{
+        // localAddr represents what the remote peer says they see as the address
+        // for this node. It is not necessarily trustworthy.
+
+        // Get the reachability from our node's potential localAddr to the remote.
+        reach := getRemoteReachabilityFromLocal(localAddr, remoteAddr)
+
+        // Return early with reach if the remote peer suggested a local address.
+        if isLocal(localAddr.IP) </span><span class="cov8" title="1">{
+                return false, reach
+        }</span>
+
+        <span class="cov8" title="1">net := localAddr.Type
+
+        // Good reach means the local address can reach the remote address
+        localIPv4WithGoodReach := (net == IPv4Address &amp;&amp; (reach == Ipv4 ||
+                reach == Default))
+        localIPv6WithGoodReach := (net == IPv6Address &amp;&amp; (reach == Ipv6Weak ||
+                reach == Ipv6Strong || reach == Teredo || reach == Default))
+        localTorV3WithGoodReach := (net == TorV3Address &amp;&amp; (reach == PrivateTorV3 ||
+                reach == Default))
+
+        goodReach := localIPv4WithGoodReach || localIPv6WithGoodReach ||
+                localTorV3WithGoodReach
+
+        return goodReach, reach</span>
+}
+
+// New constructs a new address manager instance.
+// Use Start to begin processing asynchronous address updates.
+func New(dataDir string) *AddrManager <span class="cov8" title="1">{
+        am := AddrManager{
+                peersFile:       filepath.Join(dataDir, peersFilename),
+                quit:            make(chan struct{}),
+                localAddresses:  make(map[string]*localAddress),
+                triedBucketSize: defaultTriedBucketSize,
+        }
+        am.reset()
+        return &amp;am
+}</span>
+</pre>
+		
+		<pre class="file" id="file1" style="display: none">// Copyright (c) 2024 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
+package addrmgr
+
+// ErrorKind identifies a kind of error.  It has full support for errors.Is
+// and errors.As, so the caller can directly check against an error kind
+// when determining the reason for an error.
+type ErrorKind string
+
+// These constants are used to identify a specific RuleError.
+const (
+        // ErrAddressNotFound indicates that an operation in the address manager
+        // failed due to an address lookup failure.
+        ErrAddressNotFound = ErrorKind("ErrAddressNotFound")
+
+        // ErrUnknownAddressType indicates that the network address type could not
+        // be determined from a network address' bytes.
+        ErrUnknownAddressType = ErrorKind("ErrUnknownAddressType")
+
+        // ErrMismatchedAddressType indicates that a network address was expected to
+        // be a certain type, but the derived type does not match.
+        ErrMismatchedAddressType = ErrorKind("ErrMismatchedAddressType")
+)
+
+// Error satisfies the error interface and prints human-readable errors.
+func (e ErrorKind) Error() string <span class="cov8" title="1">{
+        return string(e)
+}</span>
+
+// Error identifies an address manager error. It has full support for
+// errors.Is and errors.As, so the caller can ascertain the specific reason
+// for the error by checking the underlying error.
+type Error struct {
+        Err         error
+        Description string
+}
+
+// Error satisfies the error interface and prints human-readable errors.
+func (e Error) Error() string <span class="cov8" title="1">{
+        return e.Description
+}</span>
+
+// Unwrap returns the underlying wrapped error.
+func (e Error) Unwrap() error <span class="cov8" title="1">{
+        return e.Err
+}</span>
+
+// makeError creates an Error given a set of arguments.
+func makeError(kind ErrorKind, desc string) Error <span class="cov8" title="1">{
+        return Error{Err: kind, Description: desc}
+}</span>
+</pre>
+		
+		<pre class="file" id="file2" style="display: none">// Copyright (c) 2013-2014 The btcsuite developers
+// Copyright (c) 2015-2024 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
+package addrmgr
+
+import (
+        "math"
+        "sync"
+        "time"
+)
+
+// KnownAddress tracks information about a known network address that is used
+// to determine how viable an address is.
+type KnownAddress struct {
+        // mtx is used to ensure safe concurrent access to methods on a known
+        // address instance.
+        mtx sync.Mutex
+
+        // na is the primary network address that the known address represents.
+        na *NetAddress
+
+        // srcAddr is the network address of the peer that suggested the primary
+        // network address.
+        srcAddr *NetAddress
+
+        // The following fields track the attempts made to connect to the primary
+        // network address. Initially connecting to a peer counts as an attempt,
+        // and a successful version message exchange resets the number of attempts
+        // to zero.
+        attempts    int
+        lastattempt time.Time
+        lastsuccess time.Time
+
+        // tried indicates whether the address currently exists in a tried bucket.
+        tried bool
+
+        // refs represents the total number of new buckets that the known address
+        // exists in. This is updated as the address moves between new and tried
+        // buckets.
+        refs int
+}
+
+// NetAddress returns the underlying addrmgr.NetAddress associated with the
+// known address.
+func (ka *KnownAddress) NetAddress() *NetAddress <span class="cov8" title="1">{
+        ka.mtx.Lock()
+        defer ka.mtx.Unlock()
+        return ka.na
+}</span>
+
+// LastAttempt returns the last time the known address was attempted.
+func (ka *KnownAddress) LastAttempt() time.Time <span class="cov8" title="1">{
+        ka.mtx.Lock()
+        defer ka.mtx.Unlock()
+        return ka.lastattempt
+}</span>
+
+// chance returns the selection probability for a known address. The priority
+// depends upon how recently the address has been seen, how recently it was last
+// attempted, and how often attempts to connect to it have failed.
+func (ka *KnownAddress) chance() float64 <span class="cov8" title="1">{
+        ka.mtx.Lock()
+        defer ka.mtx.Unlock()
+
+        // Very recent attempts are less likely to be retried.
+        const minChance = 0.01
+        if ka.lastattempt.IsZero() ||
+                time.Since(ka.lastattempt) &lt; 10*time.Minute </span><span class="cov8" title="1">{
+                return minChance
+        }</span>
+
+        // Failed attempts deprioritise.
+        <span class="cov8" title="1">c := 1.0 / math.Pow(1.5, float64(ka.attempts))
+
+        return math.Max(c, minChance)</span>
+}
+
+// isBad returns true if the address in question has not been tried in the last
+// minute and meets one of the following criteria:
+// 1) It claims to be from the future
+// 2) It hasn't been seen in over a month
+// 3) It has failed at least three times and never succeeded
+// 4) It has failed a total of maxFailures in the last week
+// An address that meets any of these criteria is assumed to be worthless.
+func (ka *KnownAddress) isBad() bool <span class="cov8" title="1">{
+        ka.mtx.Lock()
+        defer ka.mtx.Unlock()
+        now := time.Now()
+
+        switch </span>{
+
+        // Wait a minute after the last check
+        case ka.lastattempt.After(now.Add(-1 * time.Minute)):<span class="cov8" title="1">
+                return false</span>
+
+        // From the future?
+        case ka.na.Timestamp.After(now.Add(10 * time.Minute)):<span class="cov8" title="1">
+                return true</span>
+
+        // Over a month old?
+        case ka.na.Timestamp.Before(now.Add(-1 * numMissingDays * time.Hour * 24)):<span class="cov8" title="1">
+                return true</span>
+
+        // Never succeeded?
+        case ka.lastsuccess.IsZero() &amp;&amp; ka.attempts &gt;= numRetries:<span class="cov8" title="1">
+                return true</span>
+
+        // Hasn't succeeded in too long?
+        case !ka.lastsuccess.After(now.Add(-1*minBadDays*time.Hour*24)) &amp;&amp;
+                ka.attempts &gt;= maxFailures:<span class="cov8" title="1">
+                return true</span>
+
+        default:<span class="cov8" title="1">
+                return false</span>
+        }
+}
+</pre>
+		
+		<pre class="file" id="file3" style="display: none">// Copyright (c) 2013-2014 The btcsuite developers
+// Copyright (c) 2015-2021 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
+package addrmgr
+
+import (
+        "github.com/decred/slog"
+)
+
+// log is a logger that is initialized with no output filters.  This
+// means the package will not perform any logging by default until the caller
+// requests it.
+// The default amount of logging is none.
+var log = slog.Disabled
+
+// UseLogger uses a specified Logger to output package logging info.
+// This should be used in preference to SetLogWriter if the caller is also
+// using slog.
+func UseLogger(logger slog.Logger) <span class="cov8" title="1">{
+        log = logger
+}</span>
+</pre>
+		
+		<pre class="file" id="file4" style="display: none">// Copyright (c) 2024 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
+package addrmgr
+
+import (
+        "encoding/base32"
+        "fmt"
+        "net"
+        "strconv"
+        "strings"
+        "time"
+
+        "github.com/decred/dcrd/wire"
+)
+
+// NetAddress defines information about a peer on the network.
+type NetAddress struct {
+        // Type represents the type of an address (IPv4, IPv6, Tor, etc.).
+        Type NetAddressType
+
+        // IP address of the peer. It is defined as a byte array to support various
+        // address types that are not standard to the net module and therefore not
+        // entirely appropriate to store as a net.IP.
+        IP []byte
+
+        // Port is the port of the remote peer.
+        Port uint16
+
+        // Timestamp is the last time the address was seen.
+        Timestamp time.Time
+
+        // Services represents the service flags supported by this network address.
+        Services wire.ServiceFlag
+}
+
+// IsRoutable returns a boolean indicating whether the network address is
+// routable.
+func (netAddr *NetAddress) IsRoutable() bool <span class="cov8" title="1">{
+        return IsRoutable(netAddr.IP)
+}</span>
+
+// ipString returns a string representation of the network address' IP field.
+// If the ip is in the range used for Tor addresses then it will be transformed
+// into the respective .onion address. It does not include the port.
+func (netAddr *NetAddress) ipString() string <span class="cov8" title="1">{
+        netIP := netAddr.IP
+        switch netAddr.Type </span>{
+        case TorV3Address:<span class="cov8" title="1">
+                // A TorV3 onion address is 35 bytes total:
+                // A 32 byte pubkey, then a 2 byte checksum, then a 1 byte version.
+
+                // By default, the address manager parses and stores TorV3 address as
+                // the 32 byte pubkey only. Therefore, it is safe to assume that the
+                // input netIP is not the full 35 byte onion address and will need to
+                // be constructed from the pubkey.
+                if len(netIP) == 32 </span><span class="cov8" title="1">{
+                        var pubkey [32]byte
+                        copy(pubkey[:], netIP)                // Already had the pubkey
+                        checksum := calcTorV3Checksum(pubkey) // Generate the checksum
+                        var fullAddress [35]byte
+                        copy(fullAddress[:32], pubkey[:])
+                        copy(fullAddress[32:], checksum[:])
+                        fullAddress[34] = 3 // Set the version byte for TorV3
+
+                        base32 := base32.StdEncoding.EncodeToString(fullAddress[:])
+                        return strings.ToLower(base32) + ".onion"
+                }</span>
+        case IPv6Address:<span class="cov8" title="1">
+                return net.IP(netIP).String()</span>
+        case IPv4Address:<span class="cov8" title="1">
+                return net.IP(netIP).String()</span>
+        }
+
+        // If the netAddr.Type is not recognized in the switch:
+        <span class="cov8" title="1">return fmt.Sprintf(
+                "unsupported IP type %d, %s, %x", netAddr.Type, netIP, netIP)</span>
+}
+
+// Key returns a string that can be used to uniquely represent the network
+// address and includes the port.
+func (netAddr *NetAddress) Key() string <span class="cov8" title="1">{
+        portString := strconv.FormatUint(uint64(netAddr.Port), 10)
+        return net.JoinHostPort(netAddr.ipString(), portString)
+}</span>
+
+// String returns a human-readable string for the network address.  This is
+// equivalent to calling Key, but is provided so the type can be used as a
+// fmt.Stringer.
+func (netAddr *NetAddress) String() string <span class="cov8" title="1">{
+        return netAddr.Key()
+}</span>
+
+// Clone creates a shallow copy of the NetAddress instance. The IP reference
+// is shared since it is not mutated.
+func (netAddr *NetAddress) Clone() *NetAddress <span class="cov8" title="1">{
+        netAddrCopy := *netAddr
+        return &amp;netAddrCopy
+}</span>
+
+// AddService adds the provided service to the set of services that the
+// network address supports.
+func (netAddr *NetAddress) AddService(service wire.ServiceFlag) <span class="cov8" title="1">{
+        netAddr.Services |= service
+}</span>
+
+// canonicalizeIP converts the provided address' bytes into a standard structure
+// based on the type of the network address, if applicable.
+func canonicalizeIP(addrType NetAddressType, addrBytes []byte) []byte <span class="cov8" title="1">{
+        if addrBytes == nil </span><span class="cov8" title="1">{
+                return nil
+        }</span>
+        <span class="cov8" title="1">switch </span>{
+        case len(addrBytes) == 16 &amp;&amp; addrType == IPv4Address:<span class="cov8" title="1">
+                return net.IP(addrBytes).To4()</span>
+        case addrType == IPv6Address:<span class="cov8" title="1">
+                return net.IP(addrBytes).To16()</span>
+        }
+        // Given a Tor address (or other), the bytes are returned unchanged.
+        <span class="cov8" title="1">return addrBytes</span>
+}
+
+// deriveNetAddressType attempts to determine the network address type from the
+// address' raw bytes. If the type cannot be determined, an error is returned.
+func deriveNetAddressType(claimedType NetAddressType, addrBytes []byte) (NetAddressType, error) <span class="cov8" title="1">{
+        len := len(addrBytes)
+        switch </span>{
+        case isIPv4(addrBytes):<span class="cov8" title="1">
+                return IPv4Address, nil</span>
+        case len == 16:<span class="cov8" title="1">
+                return IPv6Address, nil</span>
+        case len == 32 &amp;&amp; claimedType == TorV3Address:<span class="cov8" title="1">
+                return TorV3Address, nil</span>
+        }
+        <span class="cov8" title="1">str := fmt.Sprintf("unable to determine address type from raw network "+
+                "address bytes: %v", addrBytes)
+        return UnknownAddressType, makeError(ErrUnknownAddressType, str)</span>
+}
+
+// checkNetAddressType returns an error if the suggested address type does not
+// appear to match the provided address.
+func checkNetAddressType(addrType NetAddressType, addrBytes []byte) error <span class="cov8" title="1">{
+        derivedAddressType, err := deriveNetAddressType(addrType, addrBytes)
+        if err != nil </span><span class="cov8" title="1">{
+                return err
+        }</span>
+        <span class="cov8" title="1">if addrType != derivedAddressType </span><span class="cov8" title="1">{
+                str := fmt.Sprintf("derived address type does not match expected value"+
+                        " (got %v, expected %v, address bytes %v).", derivedAddressType,
+                        addrType, addrBytes)
+                return makeError(ErrMismatchedAddressType, str)
+        }</span>
+        <span class="cov8" title="1">return nil</span>
+}
+
+// NewNetAddressFromParams creates a new network address from the given
+// parameters. If the provided address type does not appear to match the
+// address, an error is returned.
+func NewNetAddressFromParams(netAddressType NetAddressType, addrBytes []byte, port uint16, timestamp time.Time, services wire.ServiceFlag) (*NetAddress, error) <span class="cov8" title="1">{
+        canonicalizedIP := canonicalizeIP(netAddressType, addrBytes)
+        err := checkNetAddressType(netAddressType, canonicalizedIP)
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, err
+        }</span>
+        <span class="cov8" title="1">return &amp;NetAddress{
+                Type:      netAddressType,
+                IP:        canonicalizedIP,
+                Port:      port,
+                Services:  services,
+                Timestamp: timestamp,
+        }, nil</span>
+}
+
+// newNetAddressFromString creates a new network address from the given string.
+// The address string is expected to be provided in the format "host:port".
+func (a *AddrManager) newNetAddressFromString(addr string) (*NetAddress, error) <span class="cov8" title="1">{
+        host, portStr, err := net.SplitHostPort(addr)
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, err
+        }</span>
+        <span class="cov8" title="1">port, err := strconv.ParseUint(portStr, 10, 16)
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, err
+        }</span>
+        <span class="cov8" title="1">addrType, addrBytes, err := ParseHost(host)
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, err
+        }</span>
+        <span class="cov8" title="1">if addrType == UnknownAddressType </span><span class="cov8" title="1">{
+                str := fmt.Sprintf("failed to deserialize address %s", addr)
+                return nil, makeError(ErrUnknownAddressType, str)
+        }</span>
+        <span class="cov8" title="1">timestamp := time.Unix(time.Now().Unix(), 0)
+        return NewNetAddressFromParams(addrType, addrBytes, uint16(port), timestamp,
+                wire.SFNodeNetwork)</span>
+}
+
+// NewNetAddressFromIPPort creates a new network address given an ip, port, and
+// the supported service flags for the address. The provided ip MUST be a valid
+// IPv4 or IPv6 address, since this method does not perform error checking on
+// the derived network address type. Furthermore, other types of network
+// addresses (like TorV3 or I2P) will not be recognized.
+func NewNetAddressFromIPPort(ip net.IP, port uint16, services wire.ServiceFlag) *NetAddress <span class="cov8" title="1">{
+        netAddressType, _ := deriveNetAddressType(UnknownAddressType, ip)
+        timestamp := time.Unix(time.Now().Unix(), 0)
+        canonicalizedIP := canonicalizeIP(netAddressType, ip)
+        return &amp;NetAddress{
+                Type:      netAddressType,
+                IP:        canonicalizedIP,
+                Port:      port,
+                Services:  services,
+                Timestamp: timestamp,
+        }
+}</span>
+</pre>
+		
+		<pre class="file" id="file5" style="display: none">// Copyright (c) 2013-2014 The btcsuite developers
+// Copyright (c) 2015-2024 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
+package addrmgr
+
+import (
+        "fmt"
+        "net"
+
+        "golang.org/x/crypto/sha3"
+)
+
+// torV3VersionByte represents the version byte used when encoding and decoding
+// a TorV3 host name.
+const torV3VersionByte = byte(3)
+
+var (
+        // rfc1918Nets specifies the IPv4 private address blocks as defined by
+        // RFC1918 (10.0.0.0/8, 172.16.0.0/12, and 192.168.0.0/16).
+        rfc1918Nets = []net.IPNet{
+                ipNet("10.0.0.0", 8, 32),
+                ipNet("172.16.0.0", 12, 32),
+                ipNet("192.168.0.0", 16, 32),
+        }
+
+        // rfc2544Net specifies the IPv4 block as defined by RFC2544
+        // (198.18.0.0/15).
+        rfc2544Net = ipNet("198.18.0.0", 15, 32)
+
+        // rfc3849Net specifies the IPv6 documentation address block as defined
+        // by RFC3849 (2001:DB8::/32).
+        rfc3849Net = ipNet("2001:DB8::", 32, 128)
+
+        // rfc3927Net specifies the IPv4 auto configuration address block as
+        // defined by RFC3927 (169.254.0.0/16).
+        rfc3927Net = ipNet("169.254.0.0", 16, 32)
+
+        // rfc3964Net specifies the IPv6 to IPv4 encapsulation address block as
+        // defined by RFC3964 (2002::/16).
+        rfc3964Net = ipNet("2002::", 16, 128)
+
+        // rfc4193Net specifies the IPv6 unique local address block as defined
+        // by RFC4193 (FC00::/7).
+        rfc4193Net = ipNet("FC00::", 7, 128)
+
+        // rfc4380Net specifies the IPv6 teredo tunneling over UDP address block
+        // as defined by RFC4380 (2001::/32).
+        rfc4380Net = ipNet("2001::", 32, 128)
+
+        // rfc4843Net specifies the IPv6 ORCHID address block as defined by
+        // RFC4843 (2001:10::/28).
+        rfc4843Net = ipNet("2001:10::", 28, 128)
+
+        // rfc4862Net specifies the IPv6 stateless address autoconfiguration
+        // address block as defined by RFC4862 (FE80::/64).
+        rfc4862Net = ipNet("FE80::", 64, 128)
+
+        // rfc5737Net specifies the IPv4 documentation address blocks as defined
+        // by RFC5737 (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24).
+        rfc5737Net = []net.IPNet{
+                ipNet("192.0.2.0", 24, 32),
+                ipNet("198.51.100.0", 24, 32),
+                ipNet("203.0.113.0", 24, 32),
+        }
+
+        // rfc6052Net specifies the IPv6 well-known prefix address block as
+        // defined by RFC6052 (64:FF9B::/96).
+        rfc6052Net = ipNet("64:FF9B::", 96, 128)
+
+        // rfc6145Net specifies the IPv6 to IPv4 translated address range as
+        // defined by RFC6145 (::FFFF:0:0:0/96).
+        rfc6145Net = ipNet("::FFFF:0:0:0", 96, 128)
+
+        // rfc6598Net specifies the IPv4 block as defined by RFC6598 (100.64.0.0/10).
+        rfc6598Net = ipNet("100.64.0.0", 10, 32)
+
+        // zero4Net defines the IPv4 address block for address staring with 0
+        // (0.0.0.0/8).
+        zero4Net = ipNet("0.0.0.0", 8, 32)
+
+        // heNet defines the Hurricane Electric IPv6 address block.
+        heNet = ipNet("2001:470::", 32, 128)
+)
+
+// ipNet returns a net.IPNet struct given the passed IP address string, number
+// of one bits to include at the start of the mask, and the total number of bits
+// for the mask.
+func ipNet(ip string, ones, bits int) net.IPNet <span class="cov8" title="1">{
+        return net.IPNet{IP: net.ParseIP(ip), Mask: net.CIDRMask(ones, bits)}
+}</span>
+
+// isIPv4 returns whether or not the given address is an IPv4 address.
+func isIPv4(netIP net.IP) bool <span class="cov8" title="1">{
+        return netIP.To4() != nil
+}</span>
+
+// isLocal returns whether or not the given address is a local address.
+func isLocal(netIP net.IP) bool <span class="cov8" title="1">{
+        return netIP.IsLoopback() || zero4Net.Contains(netIP)
+}</span>
+
+// NetAddressType represents the type of an address (IPv4, IPv6, Tor, etc.).
+type NetAddressType uint8
+
+// NOTE: This specifically does not use iota since the NetAddressType is used in
+// serialization. These constants cannot be changed or re-used if new items are
+// added.
+const (
+        UnknownAddressType NetAddressType = 0
+        IPv4Address        NetAddressType = 1
+        IPv6Address        NetAddressType = 2
+        // TorV2Address       NetAddressType = 3  // No longer supported
+        TorV3Address NetAddressType = 4
+        I2PAddress   NetAddressType = 5
+)
+
+// isRFC1918 returns whether or not the passed address is part of the IPv4
+// private network address space as defined by RFC1918 (10.0.0.0/8,
+// 172.16.0.0/12, or 192.168.0.0/16).
+func isRFC1918(netIP net.IP) bool <span class="cov8" title="1">{
+        for _, rfc := range rfc1918Nets </span><span class="cov8" title="1">{
+                if rfc.Contains(netIP) </span><span class="cov8" title="1">{
+                        return true
+                }</span>
+        }
+        <span class="cov8" title="1">return false</span>
+}
+
+// isRFC2544 returns whether or not the passed address is part of the IPv4
+// address space as defined by RFC2544 (198.18.0.0/15).
+func isRFC2544(netIP net.IP) bool <span class="cov8" title="1">{
+        return rfc2544Net.Contains(netIP)
+}</span>
+
+// isRFC3849 returns whether or not the passed address is part of the IPv6
+// documentation range as defined by RFC3849 (2001:DB8::/32).
+func isRFC3849(netIP net.IP) bool <span class="cov8" title="1">{
+        return rfc3849Net.Contains(netIP)
+}</span>
+
+// isRFC3927 returns whether or not the passed address is part of the IPv4
+// autoconfiguration range as defined by RFC3927 (169.254.0.0/16).
+func isRFC3927(netIP net.IP) bool <span class="cov8" title="1">{
+        return rfc3927Net.Contains(netIP)
+}</span>
+
+// isRFC3964 returns whether or not the passed address is part of the IPv6 to
+// IPv4 encapsulation range as defined by RFC3964 (2002::/16).
+func isRFC3964(netIP net.IP) bool <span class="cov8" title="1">{
+        return rfc3964Net.Contains(netIP)
+}</span>
+
+// isRFC4193 returns whether or not the passed address is part of the IPv6
+// unique local range as defined by RFC4193 (FC00::/7).
+func isRFC4193(netIP net.IP) bool <span class="cov8" title="1">{
+        return rfc4193Net.Contains(netIP)
+}</span>
+
+// isRFC4380 returns whether or not the passed address is part of the IPv6
+// teredo tunneling over UDP range as defined by RFC4380 (2001::/32).
+func isRFC4380(netIP net.IP) bool <span class="cov8" title="1">{
+        return rfc4380Net.Contains(netIP)
+}</span>
+
+// isRFC4843 returns whether or not the passed address is part of the IPv6
+// ORCHID range as defined by RFC4843 (2001:10::/28).
+func isRFC4843(netIP net.IP) bool <span class="cov8" title="1">{
+        return rfc4843Net.Contains(netIP)
+}</span>
+
+// isRFC4862 returns whether or not the passed address is part of the IPv6
+// stateless address autoconfiguration range as defined by RFC4862 (FE80::/64).
+func isRFC4862(netIP net.IP) bool <span class="cov8" title="1">{
+        return rfc4862Net.Contains(netIP)
+}</span>
+
+// isRFC5737 returns whether or not the passed address is part of the IPv4
+// documentation address space as defined by RFC5737 (192.0.2.0/24,
+// 198.51.100.0/24, 203.0.113.0/24).
+func isRFC5737(netIP net.IP) bool <span class="cov8" title="1">{
+        for _, rfc := range rfc5737Net </span><span class="cov8" title="1">{
+                if rfc.Contains(netIP) </span><span class="cov8" title="1">{
+                        return true
+                }</span>
+        }
+
+        <span class="cov8" title="1">return false</span>
+}
+
+// isRFC6052 returns whether or not the passed address is part of the IPv6
+// well-known prefix range as defined by RFC6052 (64:FF9B::/96).
+func isRFC6052(netIP net.IP) bool <span class="cov8" title="1">{
+        return rfc6052Net.Contains(netIP)
+}</span>
+
+// isRFC6145 returns whether or not the passed address is part of the IPv6 to
+// IPv4 translated address range as defined by RFC6145 (::FFFF:0:0:0/96).
+func isRFC6145(netIP net.IP) bool <span class="cov8" title="1">{
+        return rfc6145Net.Contains(netIP)
+}</span>
+
+// isRFC6598 returns whether or not the passed address is part of the IPv4
+// shared address space specified by RFC6598 (100.64.0.0/10).
+func isRFC6598(netIP net.IP) bool <span class="cov8" title="1">{
+        return rfc6598Net.Contains(netIP)
+}</span>
+
+// calcTorV3Checksum returns the checksum bytes given a 32 byte TorV3 public key.
+func calcTorV3Checksum(publicKey [32]byte) [2]byte <span class="cov8" title="1">{
+        const (
+                prefix    = ".onion checksum"
+                prefixLen = len(prefix)
+                inputLen  = prefixLen + len(publicKey) + 1
+        )
+        var input [inputLen]byte
+        copy(input[:], prefix)
+        copy(input[prefixLen:], publicKey[:])
+        input[inputLen-1] = torV3VersionByte
+        digest := sha3.Sum256(input[:])
+
+        var result [2]byte
+        copy(result[:], digest[:2])
+        return result
+}</span>
+
+// isTorV3 returns whether or not the given address is a valid TorV3 address
+// with the checksum and version bytes. If it is valid, it also returns the
+// public key of the TorV3 address.
+func isTorV3(addressBytes []byte) ([]byte, bool) <span class="cov8" title="1">{
+        if len(addressBytes) != 35 </span><span class="cov8" title="1">{
+                return nil, false
+        }</span>
+
+        <span class="cov8" title="1">version := addressBytes[34]
+        if version != torV3VersionByte </span><span class="cov8" title="1">{
+                return nil, false
+        }</span>
+
+        <span class="cov8" title="1">var publicKey [32]byte
+        copy(publicKey[:], addressBytes[:32])
+        var checksum [2]byte
+        copy(checksum[:], addressBytes[32:34])
+
+        computedChecksum := calcTorV3Checksum(publicKey)
+        if computedChecksum != checksum </span><span class="cov8" title="1">{
+                return nil, false
+        }</span>
+
+        <span class="cov8" title="1">return publicKey[:], true</span>
+}
+
+// isValid returns whether or not the passed address is valid.  The address is
+// considered invalid under the following circumstances:
+// IPv4: It is either a zero or all bits set address.
+// IPv6: It is either a zero or RFC3849 documentation address.
+func isValid(netIP net.IP) bool <span class="cov8" title="1">{
+        // IsUnspecified returns if address is 0, so only all bits set, and
+        // RFC3849 need to be explicitly checked.
+        return netIP != nil &amp;&amp; !(netIP.IsUnspecified() ||
+                netIP.Equal(net.IPv4bcast))
+}</span>
+
+// IsRoutable returns whether or not the passed address is routable over
+// the public internet.  This is true as long as the address is valid and is not
+// in any reserved ranges.
+func IsRoutable(netIP net.IP) bool <span class="cov8" title="1">{
+        return isValid(netIP) &amp;&amp; !(isRFC1918(netIP) || isRFC2544(netIP) ||
+                isRFC3927(netIP) || isRFC4862(netIP) || isRFC3849(netIP) ||
+                isRFC4843(netIP) || isRFC5737(netIP) || isRFC6598(netIP) ||
+                isLocal(netIP) || isRFC4193(netIP))
+}</span>
+
+// GroupKey returns a string representing the network group an address is part
+// of.  This is the /16 for IPv4, the /32 (/36 for he.net) for IPv6, the string
+// "local" for a local address, the string "torv3:key" where the key is the
+// first 4 bits of the pubkey for TorV3 addresses, and the string "unroutable"
+// for an unroutable address.
+func (na *NetAddress) GroupKey() string <span class="cov8" title="1">{
+        netIP := net.IP(na.IP)
+        if isLocal(netIP) </span><span class="cov8" title="1">{
+                return "local"
+        }</span>
+        <span class="cov8" title="1">if !IsRoutable(netIP) </span><span class="cov8" title="1">{
+                return "unroutable"
+        }</span>
+        <span class="cov8" title="1">if na.Type == IPv4Address </span><span class="cov8" title="1">{
+                return netIP.Mask(net.CIDRMask(16, 32)).String()
+        }</span>
+        <span class="cov8" title="1">if isRFC6145(netIP) || isRFC6052(netIP) </span><span class="cov8" title="1">{
+                // last four bytes are the ip address
+                newIP := netIP[12:16]
+                return newIP.Mask(net.CIDRMask(16, 32)).String()
+        }</span>
+
+        <span class="cov8" title="1">if isRFC3964(netIP) </span><span class="cov8" title="1">{
+                newIP := netIP[2:6]
+                return newIP.Mask(net.CIDRMask(16, 32)).String()
+        }</span>
+        <span class="cov8" title="1">if isRFC4380(netIP) </span><span class="cov8" title="1">{
+                // teredo tunnels have the last 4 bytes as the v4 address XOR
+                // 0xff.
+                newIP := net.IP(make([]byte, 4))
+                for i, byte := range netIP[12:16] </span><span class="cov8" title="1">{
+                        newIP[i] = byte ^ 0xff
+                }</span>
+                <span class="cov8" title="1">return newIP.Mask(net.CIDRMask(16, 32)).String()</span>
+        }
+        <span class="cov8" title="1">if na.Type == TorV3Address </span><span class="cov8" title="1">{
+                // group is keyed off the first 4 bits of the public key.
+                return fmt.Sprintf("torv3:%d", netIP[0]&amp;((1&lt;&lt;4)-1))
+        }</span>
+
+        // If none of the previous conditions were true, then it must be IPv6.
+        // bitcoind uses /32 for everything, except for Hurricane Electric's
+        // (he.net) IP range, which it uses /36 for.
+        <span class="cov8" title="1">bits := 32
+        if heNet.Contains(netIP) </span><span class="cov8" title="1">{
+                bits = 36
+        }</span>
+
+        <span class="cov8" title="1">return netIP.Mask(net.CIDRMask(bits, 128)).String()</span>
+}
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>

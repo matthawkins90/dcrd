@@ -740,22 +740,22 @@ func (a *AddrManager) reset() {
 // an onion address, the error is returned. If the host cannot be decoded, then
 // an unknown address type is returned without error.
 func ParseHost(host string) (NetAddressType, []byte, error) {
-	// Look for TORv3 addresses first and return early if successful.
-	// TORv3 addresses (hidden service names) are 56 char base32 + ".onion".
-	// Note that, as per the TORv3 spec, ".onion" is expected to be lowercase.
+	// Look for TorV3 addresses first and return early if successful.
+	// TorV3 addresses (hidden service names) are 56 char base32 + ".onion".
+	// Note that, as per the TorV3 spec, ".onion" is expected to be lowercase.
 	if strings.HasSuffix(host, ".onion") {
 		if len(host) == 62 {
-			// go base32 encoding uses uppercase (as does the rfc), but TOR and
+			// go base32 encoding uses uppercase (as does the rfc), but Tor and
 			// bitcoind tend to user lowercase, so we convert to uppercase here.
 			torAddressBytes, err := base32.StdEncoding.DecodeString(
 				strings.ToUpper(host[:56]))
 			if err != nil {
 				return UnknownAddressType, nil, err
 			}
-			if pubkey, valid := isTORv3(torAddressBytes); valid {
+			if pubkey, valid := isTorV3(torAddressBytes); valid {
 				// The net address bytes returned is the 32 byte pubkey,
 				// not the entire 35 byte onion address.
-				return TORv3Address, pubkey, nil
+				return TorV3Address, pubkey, nil
 			}
 		}
 	}
@@ -1099,8 +1099,8 @@ const (
 	// Ipv6Strong represents a connection state between two IPv6 addresses.
 	Ipv6Strong
 
-	// PrivateTORv3 represents a connection state between two TORv3 addresses.
-	PrivateTORv3
+	// PrivateTorV3 represents a connection state between two TorV3 addresses.
+	PrivateTorV3
 
 	// PrivateI2P represents a connection state between two I2P addresses.
 	PrivateI2P
@@ -1112,16 +1112,13 @@ const (
 // This function is safe for concurrent access.
 func getRemoteReachabilityFromLocal(localAddr, remoteAddr *NetAddress) NetAddressReach {
 	switch {
-	case remoteAddr == nil || localAddr == nil:
-		return Unreachable
-
 	case !remoteAddr.IsRoutable():
 		return Unreachable
 
-	case remoteAddr.Type == TORv3Address:
+	case remoteAddr.Type == TorV3Address:
 		switch {
-		case localAddr.Type == TORv3Address:
-			return PrivateTORv3
+		case localAddr.Type == TorV3Address:
+			return PrivateTorV3
 
 		// Tor relays can be reached by IPv4
 		case localAddr.Type == IPv4Address && localAddr.IsRoutable():
@@ -1224,18 +1221,18 @@ func (a *AddrManager) GetBestLocalAddress(remoteAddr *NetAddress) *NetAddress {
 	return bestAddress
 }
 
-// When a remote peer suggests a Net address for this local node,
-// IsCandidateForExternalNetAddress will return a boolean representing whether
-// the suggested address is actually a good candidate for this local node's
-// public external Net address. In addition,
-// IsCandidateForExternalNetAddress will return the reachability of the remote
-// address from the local address.
+// IsExternalAddrCandidate returns a boolean indicating whether a suggested Net
+// address from a remote peer is a good candidate for this local node's public
+// external Net address. Additionally, IsExternalAddrCandidate provides the type
+// of reachability that the suggested localAddr has to the remoteAddr. This
+// function is crucial because nodes need to know their own public Net
+// addresses, but cannot determine this on their own. To avoid having to ask
+// a centralized server, nodes listen to what remote peers say they see them as.
 //
 // This function is safe for concurrent access.
-func (a *AddrManager) IsCandidateForExternalNetAddress(localAddr, remoteAddr *NetAddress) (bool, NetAddressReach) {
-	// Nodes need to know what their own public Net addresses are. To avoid
-	// having to ask a centralized server, nodes listen to what remote peers say
-	// they see them as (i.e. localAddr).
+func (a *AddrManager) IsExternalAddrCandidate(localAddr, remoteAddr *NetAddress) (bool, NetAddressReach) {
+	// localAddr represents what the remote peer says they see as the address
+	// for this node. It is not necessarily trustworthy.
 
 	// Get the reachability from our node's potential localAddr to the remote.
 	reach := getRemoteReachabilityFromLocal(localAddr, remoteAddr)
@@ -1247,16 +1244,16 @@ func (a *AddrManager) IsCandidateForExternalNetAddress(localAddr, remoteAddr *Ne
 
 	net := localAddr.Type
 
-	// Good reach means the local address can reach the remote address
+	// Good reach means the local address can reach the remote address.
 	localIPv4WithGoodReach := (net == IPv4Address && (reach == Ipv4 ||
 		reach == Default))
 	localIPv6WithGoodReach := (net == IPv6Address && (reach == Ipv6Weak ||
 		reach == Ipv6Strong || reach == Teredo || reach == Default))
-	localTORv3WithGoodReach := (net == TORv3Address && (reach == PrivateTORv3 ||
+	localTorV3WithGoodReach := (net == TorV3Address && (reach == PrivateTorV3 ||
 		reach == Default))
 
 	goodReach := localIPv4WithGoodReach || localIPv6WithGoodReach ||
-		localTORv3WithGoodReach
+		localTorV3WithGoodReach
 
 	return goodReach, reach
 }

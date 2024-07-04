@@ -110,7 +110,7 @@ func TestKey(t *testing.T) {
 		{ip: "fee2::3:3", port: 8335, want: "[fee2::3:3]:8335"},
 		{ip: "fef3::4:4", port: 8336, want: "[fef3::4:4]:8336"},
 
-		// TORv3
+		// TorV3
 		{
 			ip:   torV3AddressString,
 			port: 8333,
@@ -228,15 +228,15 @@ func TestNewNetAddressFromParams(t *testing.T) {
 			error_expected: false,
 		},
 		{
-			name:      "32 byte TORv3 address stored in 32 bytes",
-			addrType:  TORv3Address,
+			name:      "32 byte TorV3 address stored in 32 bytes",
+			addrType:  TorV3Address,
 			addrBytes: torV3PubkeyBytes,
 			want: &NetAddress{
 				IP:        torV3PubkeyBytes,
 				Port:      port,
 				Services:  services,
 				Timestamp: timestamp,
-				Type:      TORv3Address,
+				Type:      TorV3Address,
 			},
 			error_expected: false,
 		},
@@ -249,7 +249,7 @@ func TestNewNetAddressFromParams(t *testing.T) {
 		},
 		{
 			name:           "Error: the provided type doesn't match the bytes",
-			addrType:       TORv3Address,
+			addrType:       TorV3Address,
 			addrBytes:      net.ParseIP("127.0.0.1").To4(),
 			want:           nil,
 			error_expected: true,
