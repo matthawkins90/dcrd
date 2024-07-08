@@ -698,6 +698,11 @@ func (a *AddrManager) AddressCache() []*NetAddress {
 		allAddr = append(allAddr, v.na)
 	}
 
+	// If all addresses were skipped, return nil.
+	if len(allAddr) == 0 {
+		return nil
+	}
+
 	// Adjust length, we only deal with high quality addresses now.
 	addrLen = len(allAddr)
 

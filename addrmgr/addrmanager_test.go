@@ -18,7 +18,10 @@ import (
 )
 
 // Put some IP in here for convenience. Points to google.
-var someIP = "173.194.115.66"
+const (
+	someIP        = "173.194.115.66"
+	nonRoutableIP = "255.255.255.255"
+)
 
 // addAddressByIP is a convenience function that adds an address to the
 // address manager given a valid string representation of an ip address and
@@ -35,11 +38,24 @@ func TestAddOrUpdateAddress(t *testing.T) {
 	if ka := amgr.GetAddress(); ka != nil {
 		t.Fatal("address manager should contain no addresses")
 	}
-	ip := net.ParseIP(someIP)
+
+	// Attempt to add a non-routable address.
+	ip := net.ParseIP(nonRoutableIP)
+	if ip == nil {
+		t.Fatalf("invalid IP address %s", nonRoutableIP)
+	}
+	na := NewNetAddressFromIPPort(net.ParseIP(nonRoutableIP), 8333, 0)
+	amgr.addOrUpdateAddress(na, na)
+	if ka := amgr.GetAddress(); ka != nil {
+		t.Fatal("address manager should contain no addresses")
+	}
+
+	// Add a good address.
+	ip = net.ParseIP(someIP)
 	if ip == nil {
 		t.Fatalf("invalid IP address %s", someIP)
 	}
-	na := NewNetAddressFromIPPort(net.ParseIP(someIP), 8333, 0)
+	na = NewNetAddressFromIPPort(net.ParseIP(someIP), 8333, 0)
 	amgr.addOrUpdateAddress(na, na)
 	ka := amgr.GetAddress()
 	newlyAddedAddr := ka.NetAddress()
@@ -83,8 +99,102 @@ func TestAddOrUpdateAddress(t *testing.T) {
 	if !netAddrFromUpdate.Timestamp.Equal(ts) {
 		t.Fatal("address manager did not update timestamp")
 	}
+
+	// Mark the address as tried.
+	err := amgr.Good(ka.NetAddress())
+	if err != nil {
+		t.Fatalf("marking address as good failed: %v", err)
+	}
+	if _, exists := amgr.addrNew[0][na.Key()]; exists {
+		t.Fatalf("expected address %s to not exist in new bucket", na)
+	}
+	// Attempt to add the same address again, even though it's already tried.
+	amgr.addOrUpdateAddress(na, na)
+
+	// Stop the address manager.
 	if err := amgr.Stop(); err != nil {
 		t.Fatalf("address manager failed to stop - %v", err)
+	}
+}
+
+// TestExpireNew ensures that expireNew will correctly throw away bad addresses
+func TestExpireNew(t *testing.T) {
+	n := New("testexpirenew")
+
+	now := time.Now()
+
+	// Create and add a good address and a bad address:
+	goodAddr := &KnownAddress{
+		// Seen 24 hours ago, so it's still good.
+		// Attempted 2 minutes ago, so we can check isBad().
+		na:          &NetAddress{Timestamp: now.Add(-1 * time.Hour)},
+		lastattempt: now.Add(-2 * time.Minute),
+		lastsuccess: now,
+		attempts:    0,
+		tried:       false,
+		refs:        2,
+	}
+
+	badAddr := &KnownAddress{
+		// Seen 40 days ago, so it's bad.
+		// Attempted 2 minutes ago, so we can check isBad().
+		na:          &NetAddress{Timestamp: now.Add(-40 * 24 * time.Hour)},
+		lastattempt: now.Add(-2 * time.Minute),
+		lastsuccess: now,
+		attempts:    0,
+		tried:       false,
+		refs:        1,
+	}
+
+	// Adding them using predefined &KnownAddresses instead of n.AddAddresses()
+	// so that it's possible to add a bad address.
+
+	bucket := 0
+	n.addrNew[bucket]["goodKey"] = goodAddr
+	n.addrNew[bucket]["badKey"] = badAddr
+	n.addrIndex["goodKey"] = goodAddr
+	n.addrIndex["badKey"] = badAddr
+	n.nNew = 2
+
+	numAddrs := n.numAddresses()
+
+	if numAddrs != 2 {
+		t.Errorf("Expected 2 addressess, got %d", numAddrs)
+	}
+
+	n.expireNew(bucket)
+
+	if _, exists := n.addrNew[bucket]["badKey"]; exists {
+		t.Error("Expected bad address to be removed")
+	}
+	if _, exists := n.addrIndex["badKey"]; exists {
+		t.Error("Expected bad address to be removed from addrIndex")
+	}
+	if _, exists := n.addrNew[bucket]["goodKey"]; !exists {
+		t.Error("Expected good address to remain")
+	}
+	numAddrs = n.numAddresses()
+	if numAddrs != 1 {
+		t.Errorf("Only expected 1 address, got %d", numAddrs)
+	}
+}
+
+func TestLoadPeersWithCorruptPeersFile(t *testing.T) {
+	dir := t.TempDir()
+	peersFile := filepath.Join(dir, peersFilename)
+	// create corrupt (empty) peers file.
+	fp, err := os.Create(peersFile)
+	if err != nil {
+		t.Fatalf("Could not create empty peers file: %s", peersFile)
+	}
+	if err := fp.Close(); err != nil {
+		t.Fatalf("Could not write empty peers file: %s", peersFile)
+	}
+	amgr := New(dir)
+	amgr.Start()
+	amgr.Stop()
+	if _, err := os.Stat(peersFile); err != nil {
+		t.Fatalf("Corrupt peers file has not been removed: %s", peersFile)
 	}
 }
 
@@ -139,25 +249,6 @@ func TestStartStop(t *testing.T) {
 	}
 }
 
-func TestLoadPeersWithCorruptPeersFile(t *testing.T) {
-	dir := t.TempDir()
-	peersFile := filepath.Join(dir, peersFilename)
-	// create corrupt (empty) peers file
-	fp, err := os.Create(peersFile)
-	if err != nil {
-		t.Fatalf("Could not create empty peers file: %s", peersFile)
-	}
-	if err := fp.Close(); err != nil {
-		t.Fatalf("Could not write empty peers file: %s", peersFile)
-	}
-	amgr := New(dir)
-	amgr.Start()
-	amgr.Stop()
-	if _, err := os.Stat(peersFile); err != nil {
-		t.Fatalf("Corrupt peers file has not been removed: %s", peersFile)
-	}
-}
-
 func TestNeedMoreAddresses(t *testing.T) {
 	n := New("testneedmoreaddresses")
 	addrsToAdd := needAddressThreshold
@@ -184,6 +275,42 @@ func TestNeedMoreAddresses(t *testing.T) {
 	b = n.NeedMoreAddresses()
 	if b {
 		t.Fatal("expected address manager to not need more addresses")
+	}
+}
+
+// TestAddressCache ensures that AddressCache doesn't return bad or
+// never-attempted addresses.
+func TestAddressCache(t *testing.T) {
+	// Test that the randomized subset is nil if no addresses are known.
+	n := New("testaddresscacheisempty")
+	addrList := n.AddressCache()
+	if addrList != nil {
+		t.Fatalf("expected empty AddressCache. Got %v", addrList)
+	}
+
+	// Test that bad and never-attempted addresses aren't shared.
+	n = New("testaddresscachewithbad")
+	srcAddr := NewNetAddressFromIPPort(net.ParseIP("173.144.173.111"), 8333, 0)
+	// Create and add a bad address from the future.
+	futureTime := time.Now().AddDate(0, 1, 0)
+	badAddr := NetAddress{
+		Type:      IPv4Address,
+		IP:        net.ParseIP("6.6.6.6"),
+		Port:      uint16(8333),
+		Timestamp: time.Unix(futureTime.Unix(), 0),
+		Services:  wire.SFNodeNetwork,
+	}
+	badAddrSlice := make([]*NetAddress, 1)
+	badAddrSlice[0] = &badAddr
+	n.AddAddresses(badAddrSlice, srcAddr)
+	// Create and add a good address, but don't mark it as attempted.
+	goodAddrSlice := make([]*NetAddress, 1)
+	goodAddrSlice[0] = NewNetAddressFromIPPort(net.ParseIP("1.1.1.1"), 8333, wire.SFNodeNetwork)
+	n.AddAddresses(goodAddrSlice, srcAddr)
+	// Neither address should be returned.
+	addrList = n.AddressCache()
+	if addrList != nil {
+		t.Fatalf("expected empty AddressCache. Got %v", addrList)
 	}
 }
 
