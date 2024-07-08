@@ -159,7 +159,7 @@ func TestExpireNew(t *testing.T) {
 	numAddrs := n.numAddresses()
 
 	if numAddrs != 2 {
-		t.Errorf("Expected 2 addressess, got %d", numAddrs)
+		t.Errorf("Expected 2 addresses, got %d", numAddrs)
 	}
 
 	n.expireNew(bucket)
