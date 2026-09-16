@@ -1840,6 +1840,107 @@ func TestImmatureTicketSpend(t *testing.T) {
 	}
 }
 
+// TestInvalidTicketInput ensures that the transaction input checks reject a
+// vote or a revocation whose ticket input references an unspent stake output
+// that is not part of a ticket purchase and accept them when the ticket input
+// references a ticket purchase.
+//
+// The block validation path cannot trigger the rejection.  The ticket
+// redeemer checks run first and only allow votes for winning tickets and
+// revocations for missed or expired tickets, and the ticket input must
+// reference the first output, so it always references the first output of a
+// ticket purchase.  The mempool does not run the ticket redeemer checks, so it
+// relies on the transaction input checks directly.
+func TestInvalidTicketInput(t *testing.T) {
+	t.Parallel()
+
+	// Create a test harness initialized with the genesis block as the tip,
+	// advance it to stake validation height, add a block that misses a vote,
+	// and add a block that revokes the missed ticket and misses another vote.
+	//
+	//   ... -> bsv# -> b1 -> b2
+	params := chaincfg.RegNetParams()
+	g := newChaingenHarness(t, params)
+	g.AdvanceToStakeValidationHeight()
+	g.NextBlock("b1", nil, nil, g.ReplaceWithNVotes(4))
+	g.AcceptTipBlock()
+	g.NextBlock("b2", nil, nil, g.ReplaceWithNVotes(4))
+	g.AssertTipNumRevocations(1)
+	g.AcceptTipBlock()
+
+	// The revocation is the final stake transaction of the tip block.  Its
+	// first output is an unspent stake output that is not part of a ticket
+	// purchase, whereas the first output of a vote is an OP_RETURN output that
+	// is never part of the utxo set.
+	tip := g.Tip()
+	tipRevokeIdx := uint32(len(tip.STransactions) - 1)
+	g.AssertBlockRevocationTx(tip, tipRevokeIdx)
+	tipRevokeTx := tip.STransactions[tipRevokeIdx]
+
+	// Generate the next block without accepting it to obtain a vote for a
+	// winning ticket of the tip block and a revocation for the ticket that the
+	// tip block missed.  The votes are the first stake transactions of the
+	// block, and the revocation is the final one.
+	nextBlock := g.NextBlock("b3", nil, nil)
+	voteTx := nextBlock.STransactions[0]
+	if !stake.IsSSGen(voteTx) {
+		t.Fatal("first stake transaction of the next block is not a vote")
+	}
+	revokeIdx := uint32(len(nextBlock.STransactions) - 1)
+	g.AssertBlockRevocationTx(nextBlock, revokeIdx)
+	revokeTx := nextBlock.STransactions[revokeIdx]
+
+	// Create copies of the vote and the revocation whose ticket input
+	// references the revocation in the tip block instead of a ticket purchase.
+	// The output index and tree are unchanged, so the copies are still
+	// identified as a vote and a revocation.
+	badVoteTx := voteTx.Copy()
+	badVoteTx.TxIn[1].PreviousOutPoint.Hash = tipRevokeTx.TxHash()
+	badRevokeTx := revokeTx.Copy()
+	badRevokeTx.TxIn[0].PreviousOutPoint.Hash = tipRevokeTx.TxHash()
+
+	tests := []struct {
+		name    string
+		tx      *dcrutil.Tx
+		wantErr error
+	}{{
+		name: "vote references ticket purchase output",
+		tx:   dcrutil.NewTx(voteTx),
+	}, {
+		name:    "vote references revocation output",
+		tx:      dcrutil.NewTx(badVoteTx),
+		wantErr: ErrInvalidVoteInput,
+	}, {
+		name: "revocation references ticket purchase output",
+		tx:   dcrutil.NewTx(revokeTx),
+	}, {
+		name:    "revocation references revocation output",
+		tx:      dcrutil.NewTx(badRevokeTx),
+		wantErr: ErrInvalidRevokeInput,
+	}}
+
+	const checkFraudProof = true
+	const isTreasuryEnabled = false
+	const isAutoRevocationsEnabled = false
+	for _, test := range tests {
+		// The transactions do not all reference the same output, so fetch a
+		// utxo view per transaction.
+		view, err := g.chain.FetchUtxoView(test.tx, true)
+		if err != nil {
+			t.Fatalf("%q: unexpected error fetching utxo view: %v", test.name,
+				err)
+		}
+		_, err = CheckTransactionInputs(g.chain.subsidyCache, test.tx,
+			int64(tip.Header.Height)+1, view, checkFraudProof, params,
+			&tip.Header, isTreasuryEnabled, isAutoRevocationsEnabled,
+			standalone.SSVOriginal)
+		if !errors.Is(err, test.wantErr) {
+			t.Errorf("%q: mismatched error -- got %v, want %v", test.name, err,
+				test.wantErr)
+		}
+	}
+}
+
 // TestAutoRevocations ensures that all of the validation rules associated with
 // the automatic ticket revocations agenda work as expected.
 func TestAutoRevocations(t *testing.T) {
